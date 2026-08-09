@@ -1,0 +1,14 @@
+number,context_tags,default_handling,adaptation_note
+102,relationship-specific,confirm-or-neutralize,Use the user's stated family context or a generic off-frame phone recipient; never infer a real relationship from appearance.
+103,relationship-specific,confirm-or-neutralize,Use the user's stated family context or an off-frame adult cue; never infer a real relationship from appearance.
+104,consent-sensitive;interaction,partial-cue-only,Show a playful consent-positive reaction with only a necessary partial partner cue.
+106,relationship-specific;interaction,confirm-or-neutralize,Treat the kiss as fictional art direction and use a partial cue; never infer a real relationship.
+107,relationship-specific;interaction,confirm-or-neutralize,Use the user's stated context or a neutral partial hug cue; do not add a full unrequested person.
+108,caregiving;private;age-context,explicit-context-only,Require a compatible fictional caregiving context and use a fully covered non-exposing representation.
+109,caregiving;private;age-context,explicit-context-only,Require a compatible fictional caregiving context and use a fully covered non-exposing representation.
+110,private;toileting,symbolic-safe-only,Use a fully clothed symbolic bathroom cue; never depict exposure or bodily waste.
+111,private;toileting,symbolic-safe-only,Use a fully clothed symbolic bathroom cue; never depict exposure or bodily waste.
+128,private;undressing,layered-safe-only,Show an outer garment being removed over complete base clothing; never depict exposure.
+132,private;undressing,layered-safe-only,Show outer pants being removed over complete opaque base clothing or use a clearly symbolic dressing cue.
+141,private;bathing,symbolic-safe-only,Use a fully covered or non-human-safe symbolic bath setup with no exposure.
+142,private;bathing,symbolic-safe-only,Use a fully covered symbolic shower setup with no exposure.

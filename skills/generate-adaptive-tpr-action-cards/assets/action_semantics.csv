@@ -1,0 +1,28 @@
+semantic_id,english,chinese,motion_chain,key_joints,weight_shift,gaze_cue,expression_cue,required_prop,forbidden_elements,confusable_with,qa_readability_cue,version,status
+tpr-003-high-five,High five,击掌,单臂抬起并与画面边缘的手掌接触或即将接触,肩;肘;腕;掌心,向互动侧轻微前倾且支撑脚稳定,看向对方手掌,期待或开心,局部对方手掌或前臂,第二个完整人物,tpr-004-clap,只用主角色的一只手与外部手掌互动,2,approved
+tpr-004-clap,Clap your hands,拍拍手,双掌在胸前中线相向合拢,双肩;双肘;双腕;双掌,双脚均匀承重,看向双手,开心或专注,none,伙伴手,tpr-003-high-five,两只手都属于主角色并彼此相击,2,approved
+tpr-022-touch-elbows,Touch your elbows,摸摸手肘,双臂交叉屈曲并让双手分别接触对侧手肘,双肩;双肘;双腕;双手,双脚均匀承重,看向其中一侧手肘,专注或开心,none,摸耳朵;双手只碰前臂,tpr-012-grab-arms,两只手必须清楚接触手肘关节位置,1,approved
+tpr-006-wave-arms,Wave your arms,挥动双臂,肩关节带动整条手臂作大幅弧线,双肩;双肘;躯干,髋部和躯干反向平衡,跟随一侧手臂运动方向,兴奋,none,僵直对称,tpr-007-wave-hands,上臂位置必须明显变化,1,approved
+tpr-007-wave-hands,Wave your hands,挥动双手,上臂稳定而手腕带动手掌左右摆动,双肘;双腕;双掌,重心稳定且躯干变化小,看向挥手对象或镜头,友好开心,none,肩部大摆臂,tpr-006-wave-arms,动作焦点必须在手腕和手掌,1,approved
+tpr-tap-nose,Tap your nose,点点鼻子,单根食指指腹轻点鼻尖,食指;腕;鼻尖,中立站姿或坐姿,看向指尖与鼻尖,轻松好奇,none,夹鼻;悬空指向,tpr-054-touch-nose;tpr-058-pinch-nose,必须呈小面积瞬时点触,1,approved
+tpr-054-touch-nose,Touch your nose,摸鼻子,一至两根手指自然停放在鼻部,手指;腕;鼻部,中立,看向接触处或前方,自然,none,点按;夹紧,tpr-tap-nose;tpr-058-pinch-nose,必须是持续放松接触,1,approved
+tpr-058-pinch-nose,Pinch your nose,捏鼻子,拇指与食指从鼻子两侧相向夹住,拇指;食指;鼻部,中立,看向鼻部或前方,俏皮,none,单指触碰,tpr-tap-nose;tpr-054-touch-nose,鼻子必须位于两指之间,1,approved
+tpr-045-blink-eyes,Blink your eyes,眨眼睛,双侧眼睑同时处于快速闭合中段,双眼睑;眉部,身体和头部稳定,无需明确方向,自然瞬间,none,手遮眼,tpr-046-close-eyes;tpr-074-wink,双眼同步且短暂半闭或闭合,1,approved
+tpr-063-big-yawn,Give a big yawn,打个大哈欠,嘴巴大幅张开且一只手自然靠近嘴前并带动肩胸轻微伸展,下颌;嘴唇;眼睑;肩;手,身体稳定并略向后伸展,前方或略向上,明显困倦,none,只有张嘴而没有困倦线索,tpr-048-open-mouth,大张嘴;困倦眼神;手靠近嘴三项中至少两项清楚可见,1,approved
+tpr-046-close-eyes,Close your eyes,闭上眼睛,双侧眼睑完全闭合并保持,双眼睑;面部,稳定,none,放松,none,手遮眼,tpr-045-blink-eyes;tpr-074-wink,双眼持续完全闭合且双手远离眼睛,1,approved
+tpr-074-wink,Wink,眨一只眼睛,一侧眼睑闭合而另一眼睁开,单侧眼睑;同侧脸颊,稳定,睁开的眼看镜头或对象,俏皮,none,双眼同时闭合,tpr-045-blink-eyes;tpr-046-close-eyes,必须清楚显示一闭一开,1,approved
+tpr-029-shake-head,Shake your head,摇摇头,颈部沿左右方向往复旋转的中间瞬间,颈部;头部;肩线,躯干稳定,随头部偏向侧方,明确拒绝或调皮,none,上下点头,tpr-072-nod-head,肩膀保持正向且头部呈左右运动,1,approved
+tpr-072-nod-head,Nod your head,点头,下巴沿垂直弧线下降或抬起,颈部;下巴;肩线,躯干稳定,随下巴方向,同意或认真,none,左右转头,tpr-029-shake-head,运动轴必须为上下,1,approved
+tpr-077-raise-head,Raise your head,抬头,整个头部和下巴向上抬并伸展颈部,颈部;下巴,躯干直立,看前方或抬头后的目标,自然,none,只有眼球上看,tpr-175-look-up,头颅角度必须明显改变,1,approved
+tpr-066-puff-cheeks,Puff out your cheeks,鼓起脸颊,闭紧嘴唇并向口腔充气使双侧脸颊明显鼓起,双侧脸颊;嘴唇;下颌,头部与躯干稳定,看向前方,俏皮或专注,none,张嘴;手捏脸颊,tpr-055-touch-cheeks;tpr-056-pinch-cheek,双侧脸颊必须对称鼓起且双手远离脸部,1,approved
+tpr-175-look-up,Look up,向上看,眼球明确移向画面上方且头部只轻微抬起,双眼;颈部,稳定,上方目标,好奇,none,大幅仰头替代视线,tpr-077-raise-head,主要判据是瞳孔方向,1,approved
+tpr-087-hop,Hop,单腿跳,单脚起跳或落地且另一腿屈膝悬空,支撑踝;支撑膝;悬空腿,全部重心落在单侧支撑脚,看前方落点,兴奋专注,none,双脚同步离地,tpr-090-jump;tpr-091-skip,单腿支撑是硬条件,1,approved
+tpr-090-jump,Jump,跳,双腿同步屈伸且双脚同时离地或落地,双髋;双膝;双踝,左右基本对称,看向落点,兴奋,none,单脚支撑,tpr-087-hop;tpr-091-skip,必须体现双脚同步,1,approved
+tpr-091-skip,Skip,蹦蹦跳跳,一脚向前迈步接小跳并抬起另一膝,双髋;双膝;双踝,重心由一脚转移到另一脚,看向前进方向,轻快开心,none,原地单脚跳,tpr-087-hop;tpr-090-jump,必须显示向前的步跳节奏,1,approved
+tpr-144-put-away-toys,Put away your toys,把玩具放回收纳处,手持单件玩具到达收纳终点并正在放入,手;肘;髋;膝,向容器侧轻蹲或前倾,看向容器入口,专注,玩具;收纳箱或架,没有收纳目的地,tpr-146-clean-up-toys;tpr-148-pick-up-toys,必须看见明确收纳目的地和放入阶段,1,approved
+tpr-146-clean-up-toys,Clean up your toys,整理散落的玩具,一件在手且多件仍散落并持续整理,手;髋;膝,在地面与容器之间转移重心,看向当前整理区域,认真,多件玩具;开放收纳容器,只有单件终点动作,tpr-144-put-away-toys;tpr-148-pick-up-toys,必须表现持续整理任务,1,approved
+tpr-148-pick-up-toys,Pick up your toys,捡起地上的玩具,手从地面抓住玩具并刚刚抬离地面,手;髋;膝,下蹲后开始起身,看向地面玩具,专注,至少一个玩具,收纳容器成为主信息,tpr-144-put-away-toys;tpr-146-clean-up-toys,动作必须发生在地面起点,1,approved
+tpr-189-roll-ball,Roll the ball,滚球,低位手掌向前推动贴近地面的球,肩;肘;腕;掌;膝,低重心前移,看向地面滚动路径,专注,球,球离地高抛,tpr-190-pass-ball;tpr-193-bounce-ball,球必须沿地面水平运动,1,approved
+tpr-190-pass-ball,Pass the ball,传球,双手从胸前向接球对象伸出或释放球,双肩;双肘;双腕,向接球对象轻微前移,看向接球对象或对方手,合作开心,球;可选局部接球手,球沿地面滚动,tpr-189-roll-ball;tpr-191-catch-ball,球必须从主角色向另一角色移动,2,approved
+tpr-191-catch-ball,Catch the ball,接球,双手张开呈杯状并屈肘吸收来球,双肩;双肘;双腕;双掌,重心稍后移或双膝缓冲,看向来球,期待专注,球,双手位于球后方推球,tpr-190-pass-ball;tpr-193-bounce-ball,球必须朝主角色靠近并被双手接纳,2,approved
+tpr-193-bounce-ball,Bounce the ball,拍球,一手位于球正上方下压并形成垂直回弹关系,肩;肘;腕;掌;膝,膝屈且重心随球上下,看向球,活泼专注,球,水平推滚,tpr-189-roll-ball;tpr-191-catch-ball,必须清楚显示垂直下压与回弹,1,approved

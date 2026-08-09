@@ -1,0 +1,1 @@
+-r skills/generate-adaptive-tpr-action-cards/requirements.txt
