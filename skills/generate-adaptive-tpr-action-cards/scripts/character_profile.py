@@ -530,7 +530,7 @@ def main() -> int:
                         for row in profiles.values()
                     ],
                 },
-                ensure_ascii=False,
+                ensure_ascii=True,
                 indent=2,
             )
         )
@@ -544,7 +544,7 @@ def main() -> int:
     print(
         json.dumps(
             suggest(profile, args.mode, args.seed, args.count),
-            ensure_ascii=False,
+            ensure_ascii=True,
             indent=2,
         )
     )

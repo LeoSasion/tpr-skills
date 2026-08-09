@@ -216,7 +216,12 @@ def main() -> int:
     args = parse_args()
     if args.command == "scan":
         rows = scan_pool(args.photo_dir, args.pool_csv, args.character_id)
-        print(json.dumps({"registered": len(rows), "pool": str(args.pool_csv)}, ensure_ascii=False))
+        print(
+            json.dumps(
+                {"registered": len(rows), "pool": str(args.pool_csv)},
+                ensure_ascii=True,
+            )
+        )
         return 0
 
     rows = read_pool(args.pool_csv)
@@ -257,7 +262,7 @@ def main() -> int:
                 }
                 for row in choices
             ],
-            ensure_ascii=False,
+            ensure_ascii=True,
             indent=2,
         )
     )

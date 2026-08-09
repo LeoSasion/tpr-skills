@@ -320,7 +320,7 @@ def main() -> int:
                     }
                     for row in chosen
                 ],
-                ensure_ascii=False,
+                ensure_ascii=True,
                 indent=2,
             )
         )

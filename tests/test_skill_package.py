@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -23,6 +24,7 @@ class SkillPackageTests(unittest.TestCase):
             text=True,
             capture_output=True,
             check=False,
+            env={**os.environ, "PYTHONIOENCODING": "cp1252"},
         )
 
     def test_required_layout_and_frontmatter(self) -> None:
@@ -91,6 +93,8 @@ class SkillPackageTests(unittest.TestCase):
                 "伸出大拇指",
             )
             self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["chinese"], "伸出大拇指")
             with Image.open(output) as image:
                 image.load()
                 self.assertEqual(image.size, (1240, 1754))

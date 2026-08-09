@@ -133,7 +133,7 @@ def main() -> int:
                 "card_count": len(ordered),
                 "part_size": args.part_size,
             },
-            ensure_ascii=False,
+            ensure_ascii=True,
         )
     )
     return 0

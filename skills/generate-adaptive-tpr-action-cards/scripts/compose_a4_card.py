@@ -357,7 +357,8 @@ def main() -> None:
                 "caption_layout": layout,
                 "caption_pixel_sha256": pixel_sha256(caption),
             },
-            ensure_ascii=False,
+            # Keep machine-readable CLI output safe on legacy Windows consoles.
+            ensure_ascii=True,
         )
     )
 
