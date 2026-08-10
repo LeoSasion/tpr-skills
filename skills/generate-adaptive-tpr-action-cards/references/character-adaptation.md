@@ -32,24 +32,25 @@ If references appear to depict different characters, or disagreement would mater
 
 Use exactly one mode for a batch:
 
-- `recommend`: default. Use `recommended_persona` and the profile's ordered wardrobe factors, adapting them to each action.
-- `random`: choose one persona from `persona_candidates` and wardrobe factors from the approved pools using a recorded seed. Randomize art direction only, never identity anchors, apparent life stage, anatomy, or safety rules.
+- `recommend`: use only when the user explicitly asks for curated or recommended styling. Use `recommended_persona` and the profile's ordered wardrobe factors, adapting them to each action.
 - `specified`: use the user's explicit persona and wardrobe direction. Preserve identity and safety constraints even when they conflict with a styling request.
 
 Keep the selected persona stable across a batch. A persona may guide energy, styling, and expression vocabulary, but it must not make every card use the same pose or emotion.
+
+For a new batch, first let the model recommend three broad color directions from the approved library, then recommend three broad style families conditioned on the selected color. Each screen adds `更多其他`; it refreshes only that screen with next-best unshown IDs. Never mechanically randomize the recommendations. Once both choices are selected, record `specified` mode and keep both broad ranges stable across cards.
 
 ## Apply wardrobe policy
 
 Use one profile policy:
 
-- `varied`: create a distinct, action-safe full outfit for each card. Recommendation and random modes draw exact color, silhouette, and style factors from the approved pools.
+- `varied`: create a distinct, action-safe full outfit for each card. After both broad ranges are selected, rebuild the approved pools with at least four sub-palettes, four silhouettes, and four substyles inside those ranges. Cover every value before reuse and vary layering, material, texture, trim, and restrained accessories visibly.
 - `signature-variants`: preserve `signature_outfit` or signature costume elements in every mode, including `specified`, while varying approved secondary colors, layers, accessories, or silhouettes. A user-specified style may change secondary factors but cannot silently remove the character's approved signature design.
 - `fixed`: reproduce the approved `signature_outfit`; repeated clothing is correct and must not fail diversity checks.
 - `none`: use `not-applicable` for outfit, color, silhouette, and style. Do not add clothing merely to satisfy a diversity rule.
 
 Clothing must fit the apparent life stage, character anatomy, action range, and print audience. Avoid sexualization, unsafe footwear, motion-obscuring garments, loose items near wheels or steps, culturally specific symbolism not requested by the user, and accessories that cover action-critical joints or identity anchors.
 
-For recommendation or random modes, treat factor lists as prioritized or seedable design pools. The concrete `outfit` text may add action-specific detail, but `outfit_color`, `outfit_silhouette`, and `outfit_style` must exactly name selected profile factors so the plan can be audited.
+Do not use profile factor lists to choose the visible Round-1 or Round-2 recommendations. After selection, treat them as the audited expansion of the chosen ranges. Keep `outfit_style` within the selected broad style family and `outfit_color` within the selected broad color direction. Cover every approved factor before reuse, balance long-batch cycles, and add action-specific layering, material, texture, trim, or restrained accessory detail so complete outfits stay visibly different. `outfit_color`, `outfit_silhouette`, and `outfit_style` must exactly name selected profile factors.
 
 ## Adapt actions to character type
 
@@ -70,8 +71,10 @@ Include only useful profile data:
 - Selected persona and exact wardrobe factors.
 - Signature elements and `do_not_change` traits.
 - Action-specific safety and ambiguity cues.
+- The selected `background_mode` and the row's exact `background_treatment`; treat uploaded backgrounds as non-binding reference content.
+- The selected generation interface's supported reference-image and prompt fields; keep the identity, wardrobe, action, background, and safety contract semantically identical across recommended and custom backends.
 
-Do not include uncertain gender or age labels merely to force a stereotype. Prefer direct visual descriptions such as “soft rounded silhouette, short limbs, neutral playful overalls” over demographic assumptions.
+Do not include uncertain gender or age labels merely to force a stereotype. Prefer direct visual descriptions such as “soft rounded silhouette, short limbs, neutral playful overalls” over demographic assumptions. Never put an API key, token, or other authentication secret into the generation instruction.
 
 ## Visual QA
 
@@ -82,5 +85,8 @@ Judge the finished card against the profile and the actual reference:
 - Apparent life stage remains credible without exaggeration.
 - Styling does not rely on an unsupported gender stereotype.
 - Persona and outfit support the action instead of obscuring it.
+- The rendered background follows the selected batch mode, matches the recorded treatment, preserves subject/action contrast, and does not introduce identity evidence, text, branding, or distracting people/props.
+- The rendered result satisfies the same card contract regardless of the selected Skill/API; a custom backend does not relax identity, anatomy, action clarity, composition, or safety QA.
 - Fixed or no-clothing policies are not penalized for repetition.
-- Random mode is reproducible from the recorded seed and never randomizes identity.
+- Wardrobe recommendations are traceable to library IDs, the profile hash, non-sensitive evidence tokens, round/option records, and a final fingerprint. They are model-curated rather than shuffled, and never alter identity or persona.
+- The finished set visibly maximizes variation inside the selected ranges; changing only a minor trim, accessory, or nearly identical shade does not pass.

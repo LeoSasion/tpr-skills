@@ -9,11 +9,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from batch_common import (
+    EXECUTION_BACKGROUND_FIELDS,
+    GENERATION_BACKEND_FIELDS,
+    WARDROBE_SELECTION_FIELDS,
     atomic_write_csv,
     read_manifest,
     require_delivery_choice,
     select_rows,
     sha256_file,
+    validate_execution_background_rows,
+    validate_generation_backend_rows,
 )
 from verify_delivery import verify_card
 
@@ -37,12 +42,14 @@ FAILURE_CODES = {
     "GEN_ANATOMY",
     "GEN_COMPOSITION",
     "GEN_UNWANTED_ELEMENT",
+    "GEN_BACKEND_UNAVAILABLE",
     "COMP_SIZE_DPI",
     "COMP_CAPTION",
     "COMP_METADATA",
     "DIV_HEAD_GAZE",
     "DIV_EXPRESSION",
     "DIV_OUTFIT",
+    "DIV_BACKGROUND",
     "PKG_CONTENT",
     "PKG_INTEGRITY",
     "WORD_LAYOUT",
@@ -82,6 +89,9 @@ REQUIRED_FIELDS = {
     "package_sha256",
     "delivered_at",
     "updated_at",
+    *EXECUTION_BACKGROUND_FIELDS,
+    *GENERATION_BACKEND_FIELDS,
+    *WARDROBE_SELECTION_FIELDS,
 }
 
 
@@ -176,6 +186,18 @@ def advance_row(row: dict[str, str], args) -> None:
         raise ValueError(f"{row['number']}: cannot advance directly from {current} to {args.to}")
 
     if args.to == "generated":
+        execution_background_errors = validate_execution_background_rows([row])
+        if execution_background_errors:
+            raise ValueError(
+                f"{row['number']}: execution/background planning is invalid: "
+                f"{execution_background_errors}"
+            )
+        generation_backend_errors = validate_generation_backend_rows([row])
+        if generation_backend_errors:
+            raise ValueError(
+                f"{row['number']}: generation backend planning is invalid: "
+                f"{generation_backend_errors}"
+            )
         if row.get("adaptation_status") not in {"pass", "fallback"}:
             raise ValueError(f"{row['number']}: character adaptation has not passed planning")
         if row.get("diversity_plan_status") != "pass":
@@ -316,6 +338,15 @@ def main() -> int:
                         "state": row.get("workflow_state", "planned"),
                         "attempt_count": row.get("attempt_count", "0"),
                         "qa_status": row.get("qa_status", "pending"),
+                        "subagent_parallelism": row.get("subagent_parallelism", ""),
+                        "subagent_concurrency": row.get("subagent_concurrency", ""),
+                        "background_mode": row.get("background_mode", ""),
+                        "background_treatment": row.get("background_treatment", ""),
+                        "generation_backend_mode": row.get(
+                            "generation_backend_mode", ""
+                        ),
+                        "generation_interface": row.get("generation_interface", ""),
+                        "generation_model": row.get("generation_model", ""),
                         "failure_codes": row.get("failure_codes", ""),
                     }
                     for row in chosen

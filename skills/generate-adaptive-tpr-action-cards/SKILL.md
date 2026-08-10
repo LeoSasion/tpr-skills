@@ -1,6 +1,6 @@
 ---
 name: generate-adaptive-tpr-action-cards
-description: Generate, revise, resume, quality-check, package, deliver, or convert bilingual TPR action cards for any user-provided character reference, including people, animals, toys, mascots, robots, and stylized figures. Use for photo-only clickable setup, the built-in 200-action library, a four-sample approval gate before full generation, appearance and proportion analysis, apparent age and gender-presentation handling, adaptive persona and wardrobe recommendation or seeded randomization, character-consistent image editing, safe identifiers, photo-pool registration, action semantics, stateful retries, A4 composition, exact English-Chinese captions, visual QA, split ZIP delivery, Word output that hides action numbers by default, or `/img2word` and “做成word” requests.
+description: Generate, revise, resume, quality-check, package, deliver, or convert bilingual TPR action cards for any user-provided character reference, including people, animals, toys, mascots, robots, and stylized figures. Use for photo-only clickable setup, a mandatory two-round model-curated wardrobe choice, explicit default-four-worker-or-custom subagent concurrency with an orchestration-only primary agent, auto-varied-versus-pure-white backgrounds, explicit generation model/API/Skill selection, maximum within-range outfit diversity, the built-in 200-action library, a four-sample approval gate, character-consistent image editing, safe identifiers, action semantics, stateful retries, A4 composition, exact bilingual captions, visual QA, ZIP delivery, Word output, or `/img2word` and “做成word” requests.
 ---
 
 # Generate Adaptive TPR Action Cards
@@ -11,11 +11,19 @@ Create print-ready action cards that preserve the uploaded character's recogniza
 
 Run bundled scripts from this skill directory or resolve their paths absolutely. Use Python 3.10 or newer with Pillow and python-docx installed. Treat `python3` in examples as the host's verified Python 3 command; on Windows this may be `python` or `py -3`. If a dependency is missing, explain the package, install location, and side effects before requesting permission to install it.
 
+Run the one-shot local dependency probe before any generation or document work:
+
+```bash
+python3 scripts/preflight.py --json
+```
+
+Use the bundled Python path returned by the workspace runtime loader consistently; do not alternate between system `python`, a bundled interpreter, and a project virtual environment. This script does not prove that an image model, API, Skill, authentication path, rate limit, or requested concurrency is available; resolve those after the model/interface choice. If Word is selected, run `scripts/preflight.py --need-word-render --json` before generating DOCX. If the selected format is ZIP-only, skip all Word probing, DOCX creation, and document rendering. If no Office-compatible renderer or PDF rasterizer is reported, stop the Word branch immediately and explain that only structural DOCX verification is possible until LibreOffice, Microsoft Word, or WPS plus `pdftoppm` is available; do not retry a missing renderer or auto-install software. Use the probe's selected renderer once: `soffice` through the documents renderer, `wps` through one headless WPS COM PDF export, or `winword` through its native export path. Use a fresh render directory so stale `page-*.png` files cannot create a false page-count failure.
+
 ## Start with the right interaction
 
-Read [references/interaction-flow.md](references/interaction-flow.md) before asking any setup or confirmation question. When the user directly uploads one or more photos for a new case without execution settings beyond a generic request to make cards, first show the two clickable entry choices defined there: automatic recommendation or guided setup. Prefer clickable option cards for every finite question throughout the workflow; require typed input only when an exact custom value or irreducible ambiguity makes it necessary.
+Read [references/interaction-flow.md](references/interaction-flow.md), [references/wardrobe-choice.md](references/wardrobe-choice.md), and [references/wardrobe-option-library.md](references/wardrobe-option-library.md) before asking any setup or confirmation question. Detect whether the current host exposes a native input control before emitting a widget. Never assume a literal `genui…` marker will render; when no native control is available, omit the marker entirely and show the complete visible numbered fallback. When the user directly uploads one or more photos for a new case without execution settings beyond a generic request to make cards, first show the two clickable entry choices defined there: automatic route or guided setup. Both routes must then pass through the mandatory two-round wardrobe choice, the two-question concurrency/background screen, and the separate generation model/interface screen before planning or generation. Prefer native clickable option cards for every finite question throughout the workflow; require typed input only for a custom concurrency integer, custom interface details, or an irreducible ambiguity.
 
-The automatic recommended route is a two-stage gate: generate and QA four representative samples first, then wait for a clickable confirmation before expanding to all 200 actions. Reuse the four passed samples in the full batch.
+The automatic route has four gates: complete the sequential color-direction and style-family choices; choose default-four, serial, or custom concurrency and choose auto-varied or pure-white backgrounds; choose and capability-check the generation model/interface; then generate and QA four representative samples and wait for confirmation before expanding to all 200 actions. The model must curate each wardrobe set from visible evidence and the approved library; never shuffle or sample library rows mechanically. Reuse the four passed samples in the full batch.
 
 ## Resolve inputs before generation
 
@@ -25,17 +33,27 @@ Resolve all of these:
 - Canonical preset text from [references/preset-actions-200.csv](references/preset-actions-200.csv) when the request uses the built-in library.
 - The primary character and its approved original-reference directory, photo-pool CSV, and character-profile CSV.
 - Existing cards and manifest when resuming or revising.
-- Adaptation mode: `recommend`, `random`, or `specified`.
+- Adaptation mode after both wardrobe choices: `recommend` or `specified`; a selected or custom wardrobe direction is recorded as `specified`.
+- Wardrobe library version, recommendation method and fingerprint, non-sensitive evidence basis, selected color ID/round/option, selected style ID/round/option, and any exact custom override.
+- User-selected `subagent_parallelism`: `enabled`, `disabled`, or `custom`, plus the exact positive integer `subagent_concurrency`. Use `4` for enabled and `1` for disabled. Under `enabled` or `custom`, the number counts image-generation child workers and excludes the primary orchestration agent; under `disabled`, `1` denotes serial generation by the primary agent.
+- User-selected `background_mode`: `auto-varied` or `pure-white`, plus one exact `background_treatment` per selected row.
+- User-selected `generation_backend_mode`: `recommended` or `custom`, the exact non-secret `generation_interface`, and the selected `generation_model` or service label.
 - User-selected delivery format: `ZIP`, `Word`, or `both`.
 - Word identifier visibility: `hidden` or `shown`; default and recommend `hidden`.
 
-Resolve adaptation mode without a routine question: use `specified` when the user supplies a persona or wardrobe direction, `random` when the user asks for randomization, and `recommend` otherwise. Generate and record a stable seed when random mode has no user seed. Ask only when multiple uploaded characters make the primary character ambiguous or when visual uncertainty can materially change identity, anatomy, age-appropriate treatment, or action meaning; present finite resolutions as clickable choices.
+Resolve wardrobe direction before final batch planning. Unless the user already confirmed both a broad color direction and broad style family in the current turn (or the profile is `fixed`/`none`), force the two sequential four-option screens in [references/wardrobe-choice.md](references/wardrobe-choice.md). In Round 1, the model recommends three materially different broad color directions from the library using stable visible appearance, neutral proportions, apparent-life-stage safety, anatomy, user preference, and print readability. In Round 2, it recommends three materially different broad style families using the same evidence plus the selected color. `更多其他` refreshes only the current round with next-best unshown IDs. Never use RNG, a seed, shuffled rows, or the profile's Cartesian factor pool to choose visible recommendations. After both choices, use `specified` mode, finalize a recommendation fingerprint, and keep the selected ranges stable across the batch. Ask only when multiple uploaded characters, visual uncertainty, or an irreducible custom requirement needs a decision; present finite resolutions as clickable choices.
 
-If the photo-only entry uses the automatic recommended route, set delivery to `both` and Word identifier visibility to `hidden` without another question. Otherwise, if the current request does not explicitly state an output format, ask with clickable choices. Do not default to ZIP. Treat `/img2word` or “做成word” as an explicit Word choice and default its identifier visibility to `hidden` unless the user asks to show numbers. Record both decisions in every selected manifest row before generation or packaging.
+After the wardrobe rounds, force the shared two-question execution/background screen unless the user already supplied both answers or the current manifest records them. Treat `subagent_parallelism=enabled` as explicit permission for four simultaneous image-generation child workers while the primary agent remains orchestration-only; treat `disabled` as serial generation by the primary agent; after `custom`, ask for and record the exact number of image-generation child workers. The primary agent does not count toward `subagent_concurrency` in either parallel mode. Validate that the host has the primary slot plus the requested child-worker slots and that the selected image interface can sustain the requested image throughput before final planning. Never silently reduce it or use the primary agent to fill a missing worker slot. Under `pure-white`, record `background_treatment=pure-white` on every row. Under `auto-varied`, plan and record one clean, uncluttered, action-readable treatment per row and require four visibly distinct treatments in the four-sample gate.
+
+Then force the separate generation model/interface screen unless the user already supplied an exact usable route or the manifest records it. Option 1 is the exact user-facing preset `Codex 5.6 Luna Max（推荐）`, recorded as `generation_backend_mode=recommended`, `generation_interface=imagegen`, and `generation_model=Codex 5.6 Luna Max`; treat that phrase as a requested routing preset, not an assumed API model ID. Option 2 is `用户自定义` and may name another installed image-generation Skill, callable tool, or image API plus its model/service. Resolve and minimally capability-check the exact route before planning. Do not silently substitute another model or interface. Never persist API keys or tokens in the manifest, prompt, report, or logs.
+
+If the photo-only entry uses the automatic route, complete the wardrobe, execution/background, and generation route choices first; only then set `adaptation_mode=specified`, set delivery to `both`, and set Word identifier visibility to `hidden`. Otherwise, if the current request does not explicitly state an output format, ask with clickable choices. Do not infer ZIP, concurrency, background mode, or generation route from the automatic label. Treat `/img2word` or “做成word” as an explicit Word choice and default its identifier visibility to `hidden` unless the user asks to show numbers. Record both wardrobe rounds, the final fingerprint, selected-range profile pools, concurrency, background mode/treatments, generation route, and all other decisions in every selected manifest row before generation or packaging.
 
 Read and apply:
 
 - [references/character-adaptation.md](references/character-adaptation.md) before analyzing a character, choosing a persona, selecting clothing, or writing an image-edit instruction.
+- [references/wardrobe-choice.md](references/wardrobe-choice.md) before presenting wardrobe options or recording a selected style.
+- [references/wardrobe-option-library.md](references/wardrobe-option-library.md) and its CSV before ranking color or style recommendations or expanding selected ranges.
 - [references/preset-actions-200.csv](references/preset-actions-200.csv) before selecting or captioning a built-in action. Treat its 200 rows as canonical; do not reconstruct them from an older Word file, manifest, filename, or generated card.
 - [references/action-suitability.csv](references/action-suitability.csv) for relationship-specific, caregiving, private, age-context, or consent-sensitive built-in actions. Treat unlisted actions as having no special context override, not as automatically compatible with every character.
 - [references/identifier-and-filename-rules.md](references/identifier-and-filename-rules.md) before creating a manifest row, filename, card number, Word order, or package range.
@@ -53,7 +71,7 @@ Use only attached or project-available originals. Never recreate an uploaded cha
 - Preserve the primary character's stable face or head design, proportions, markings, apparent life-stage presentation, and other approved identity anchors. Allow natural changes in expression, gaze, head angle, pose, and non-anchor styling.
 - Treat apparent age and gender presentation as uncertain visual rendering labels, never as verified demographic facts. Use `uncertain`, `neutral`, or `not-applicable` when evidence is weak or the concept does not apply.
 - Treat persona as a creative art direction selected for TPR clarity, not as an inference about a real subject's personality, occupation, or identity.
-- Use a pure white background and a full-body composition. Apply the profile's wardrobe policy: varied clothing, signature variants, fixed costume, or no clothing. Include only an action-critical prop or partial partner cue.
+- Use the selected background mode and a full-body composition. For `pure-white`, require a clean pure-white field. For `auto-varied`, use the row's recorded clean background treatment with strong subject/action contrast and no text, branding, unrelated people, or distracting scenery. Apply the profile's wardrobe policy: varied clothing, signature variants, fixed costume, or no clothing. Include only an action-critical prop or partial partner cue.
 - Preserve anatomy appropriate to the character type. For an incompatible action, adapt only when the intended verb remains visually unambiguous; otherwise block with `CHARACTER_ACTION_MISMATCH`.
 - Deliver final composed PNGs at exactly 1240 x 1754 px and 150 DPI without stretching or cropping.
 - Show the normalized identifier and exact English above the exact Chinese in deterministic bold black typography on final PNG cards. Do not ask the image model to render text. Word uses derived print copies and hides the identifier by default without changing PNGs, filenames, ordering, manifests, or hashes.
@@ -73,7 +91,7 @@ Resume from the first incomplete state. Do not regenerate a `qa_passed`, `packag
 
 Normalize identifiers before filling downstream fields. Use the same final string in `number`, `output_path`, visible card numbering, Word order, and package ranges.
 
-Set `word_identifier_visibility` to `hidden` by default or `shown` only after an explicit user choice. When resuming a legacy manifest without this field, migrate it into the current template and use `hidden` unless the user previously chose visible Word numbers.
+Set `word_identifier_visibility` to `hidden` by default or `shown` only after an explicit user choice. When resuming a legacy manifest, migrate it into the current template. Use `hidden` unless the user previously chose visible Word numbers. Recover wardrobe provenance, concurrency, background choices, and generation route only from explicit evidence; if any required selection is unknown, rerun only its relevant choice screen rather than inventing values. Preserve old passed cards and package hashes while migrating fields.
 
 ### 2. Register and validate character sources
 
@@ -101,16 +119,19 @@ python3 scripts/character_profile.py validate BATCH_DIR/character_profile.csv \
 
 Copy the validator's `character_profile_sha256` into every selected manifest row. Revalidate after any profile edit; never reuse a stale hash.
 
-For recommendation or randomization, obtain reproducible starting factors:
+Analyze the approved originals before the mandatory chooser, then let the model select library IDs and use the script only to validate and format each round:
 
 ```bash
-python3 scripts/character_profile.py suggest BATCH_DIR/character_profile.csv \
-  --character-id CHARACTER_ID --mode recommend --count CARD_COUNT
-python3 scripts/character_profile.py suggest BATCH_DIR/character_profile.csv \
-  --character-id CHARACTER_ID --mode random --seed BATCH_SEED --count CARD_COUNT
+python3 scripts/wardrobe_choice.py BATCH_DIR/character_profile.csv \
+  --character-id CHARACTER_ID --stage color --round 1 \
+  --basis visible-appearance --basis neutral-proportions \
+  --basis apparent-life-stage-safety --basis print-readability \
+  --option-id COLOR_ID_1 --reason "REASON_1" \
+  --option-id COLOR_ID_2 --reason "REASON_2" \
+  --option-id COLOR_ID_3 --reason "REASON_3"
 ```
 
-Treat suggested personas and wardrobe factors as art-direction inputs. Adapt each outfit to the action, anatomy, apparent life stage, and safety notes without changing identity anchors.
+Treat the three returned entries as recommendations only. After the color selection, run the separate style stage conditioned on that color. After both selections, expand the pair into at least four approved sub-palettes, four silhouettes, and four substyles inside the chosen ranges; increment and revalidate the profile. Then use `character_profile.py suggest --mode specified` to build a maximally diverse, deterministic factor sequence. Do not change identity anchors.
 
 ### 4. Build and validate the plan
 
@@ -124,7 +145,7 @@ python3 scripts/validate_action_library.py references/preset-actions-200.csv \
 
 Copy built-in rows by `source_row`; never substitute text from an older batch. Use `assets/action_semantics.csv` when exact English and Chinese match. For a clear missing action, create a batch-local semantic record with a version. Pause only when ambiguity can change action meaning.
 
-Fill the character ID, profile version and SHA-256, adaptation mode, seed, persona, wardrobe policy, required render capabilities, action risk tags, suitability handling, adaptation status and reason, motion chain, key joints, weight shift, head angle, gaze, expression, necessary prop, outfit, color, silhouette, and style. Keep one persona, profile version, profile hash, mode, and seed across a batch. Copy every listed suitability tag and exact `default_handling` for a special-context preset and use `fallback` / `safe-override`; use `none` for both fields when no rule is listed. Never treat a structurally valid CSV as proof that a private, caregiving, relationship, or consent-sensitive image is safe: apply the rule's `adaptation_note` to the motion plan and verify it visually. Deliberately diversify visible pose and allowed wardrobe fields; never randomize identity anchors.
+Fill the character ID, profile version and SHA-256, final adaptation mode, complete two-round wardrobe provenance, persona, wardrobe policy, concurrency policy/count, background mode and exact treatment, generation backend mode/interface/model, required render capabilities, action risk tags, suitability handling, adaptation status and reason, motion chain, key joints, weight shift, head angle, gaze, expression, necessary prop, outfit, color, silhouette, and substyle. Keep one persona, profile version, profile hash, final mode, color direction, style family, recommendation fingerprint, concurrency policy/count, background mode, and generation route across a batch. Copy every listed suitability tag and exact `default_handling` for a special-context preset and use `fallback` / `safe-override`; use `none` for both fields when no rule is listed. Never treat a structurally valid CSV as proof that a private, caregiving, relationship, or consent-sensitive image is safe: apply the rule's `adaptation_note` to the motion plan and verify it visually. Within the selected wardrobe ranges, cover every approved color, silhouette, and substyle before reuse; for four samples use four colors and at least three silhouettes and three substyles when feasible. Under `auto-varied`, also use four distinct background treatments in the sample window and avoid treatment reuse within any consecutive four cards. Vary layering, material, texture, trim, and restrained accessories visibly, without drifting to another range or changing identity anchors.
 
 Run:
 
@@ -140,13 +161,15 @@ Do not generate while this check fails.
 
 ### 5. Generate one raw image per row
 
-Use the `imagegen` skill and edit from the one selected original. Generate separately with a concise instruction:
+Use the exact selected generation route and edit from the one selected original. For the recommended route, use the `imagegen` Skill only after the host confirms the requested `Codex 5.6 Luna Max` routing preset and callable image interface. For a custom route, read and follow the selected image-generation Skill or API contract before invocation. Send the same immutable identity, action, wardrobe, background, and safety constraints regardless of backend. Do not silently substitute a model, endpoint, or Skill; block with `GEN_BACKEND_UNAVAILABLE` when capability or authentication cannot be confirmed. Generate each row separately with a concise instruction:
 
 ```text
-Use the reference only to preserve the same primary character. Keep [IDENTITY ANCHORS], [APPEARANCE], [PROPORTIONS], and [APPARENT LIFE-STAGE PRESENTATION] consistent. Create a natural full-body moment of the character [ACTION AND MOTION CHAIN] on a pure white background. Use anatomy and balance appropriate to [CHARACTER KIND]. [HEAD ANGLE], [GAZE], [ACTION-ALIGNED EXPRESSION]. Art direction: [PERSONA]. Apply [OUTFIT OR COSTUME TREATMENT] under the [WARDROBE POLICY], preserving [SIGNATURE FEATURES] and avoiding [WARDROBE OR SAFETY RESTRICTIONS]. Portrait composition with generous white space and a clear bottom caption area. No text, border, scenery, unrelated props, or full additional characters. Include only [ACTION-CRITICAL PROP OR PARTIAL INTERACTION CUE] when necessary. Make [DISAMBIGUATION CUE] clearly visible and avoid [CONFUSABLE ACTION CUE].
+Use the reference only to preserve the same primary character. Keep [IDENTITY ANCHORS], [APPEARANCE], [PROPORTIONS], and [APPARENT LIFE-STAGE PRESENTATION] consistent. Create a natural full-body moment of the character [ACTION AND MOTION CHAIN]. Background: [BACKGROUND TREATMENT UNDER THE SELECTED MODE]. Use anatomy and balance appropriate to [CHARACTER KIND]. [HEAD ANGLE], [GAZE], [ACTION-ALIGNED EXPRESSION]. Art direction: [PERSONA]. Apply [OUTFIT OR COSTUME TREATMENT] under the [WARDROBE POLICY], preserving [SIGNATURE FEATURES] and avoiding [WARDROBE OR SAFETY RESTRICTIONS]. Portrait composition with generous clear space and a protected bottom caption area. No text, border, branding, unrelated props, or full additional characters. Under auto-varied mode, keep scenery simple and action-readable; under pure-white mode, include no scenery. Include only [ACTION-CRITICAL PROP OR PARTIAL INTERACTION CUE] when necessary. Make [DISAMBIGUATION CUE] clearly visible and avoid [CONFUSABLE ACTION CUE].
 ```
 
 Store raw outputs in a staging folder with versioned filenames. Record the raw path and advance the row to `generated`; do not overwrite a passed card.
+
+When `subagent_parallelism=enabled`, create a fixed pool of exactly four image-generation child workers and keep the primary agent orchestration-only. When `custom`, create exactly the recorded positive number of image-generation child workers and keep the primary agent orchestration-only. The primary agent prepares immutable work packets, assigns disjoint row identifiers, monitors completion, inspects returned artifacts, serially records manifest/state changes, performs final visual QA, packages, and summarizes; it must not call the image generator or own a row while either parallel mode is active. Give every worker immutable reference/profile/prompt inputs and unique versioned raw paths. Subagents must not edit the manifest, advance state, package, deliver, or make final QA decisions. For the four-sample gate, assign one sample to each of the four default workers. For a larger batch, reuse the bounded worker pool in waves and give a worker its next row only after its prior result returns. When `disabled`, run serially under the primary agent with `subagent_concurrency=1` and do not spawn subagents. Never parallelize retries for the same row or launch all 200 rows at once. If a child worker fails, retry or replace that child within the retry budget; never backfill its image task with the primary agent. The default topology requires five simultaneous agent slots: one primary orchestrator plus four child workers. If the host or selected interface cannot support the requested child-worker count, stop before launch and ask the user to choose the reported supported child-worker maximum, serial execution, or stopping; never silently clamp, rewrite the saved value, or switch to a primary-plus-three topology.
 
 ### 6. Compose the final card
 
@@ -231,4 +254,4 @@ Return links only for the selected format and a compact table containing identif
 
 ## Project continuity
 
-Treat later feedback as a rule update. Preserve successful defaults, character profiles, manifests, hashes, reference mappings, interactive choices, Word visibility, and user-specified identity anchors. Do not silently alter passed cards. Use failure history to improve weak character-action combinations and the approved action-semantics library.
+Treat later feedback as a rule update. Preserve successful defaults, character profiles, manifests, hashes, reference mappings, wardrobe choices, concurrency policy/count, background mode/treatments, generation route, Word visibility, and user-specified identity anchors. Do not silently alter passed cards. Use failure history to improve weak character-action combinations and the approved action-semantics library.

@@ -6,6 +6,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Iterable
@@ -14,6 +15,43 @@ from typing import Iterable
 DELIVERY_CHOICES = {"zip", "word", "both"}
 WORD_IDENTIFIER_VISIBILITIES = {"hidden", "shown"}
 DEFAULT_WORD_IDENTIFIER_VISIBILITY = "hidden"
+SUBAGENT_PARALLELISM_CHOICES = {"enabled", "disabled", "custom"}
+DEFAULT_SUBAGENT_CONCURRENCY = 4
+BACKGROUND_MODES = {"auto-varied", "pure-white"}
+EXECUTION_BACKGROUND_FIELDS = (
+    "subagent_parallelism",
+    "subagent_concurrency",
+    "background_mode",
+    "background_treatment",
+)
+GENERATION_BACKEND_MODES = {"recommended", "custom"}
+RECOMMENDED_GENERATION_INTERFACE = "imagegen"
+RECOMMENDED_GENERATION_MODEL = "Codex 5.6 Luna Max"
+GENERATION_BACKEND_FIELDS = (
+    "generation_backend_mode",
+    "generation_interface",
+    "generation_model",
+)
+WARDROBE_SELECTION_FIELDS = (
+    "wardrobe_library_version",
+    "wardrobe_recommendation_method",
+    "wardrobe_recommendation_fingerprint",
+    "wardrobe_evidence_basis",
+    "color_direction_id",
+    "color_direction_label",
+    "color_choice_round",
+    "color_choice_option",
+    "style_family_id",
+    "style_family_label",
+    "style_choice_round",
+    "style_choice_option",
+    "wardrobe_custom_override",
+)
+WARDROBE_RECOMMENDATION_METHODS = {
+    "model-curated",
+    "user-specified",
+    "not-applicable",
+}
 
 
 def read_manifest(path: Path) -> tuple[list[str], list[dict[str, str]]]:
@@ -42,6 +80,33 @@ def read_manifest(path: Path) -> tuple[list[str], list[dict[str, str]]]:
                 "Manifest has a partial character-profile schema; missing "
                 f"{sorted(profile_fields - present_profile_fields)}"
             )
+        wardrobe_fields = set(WARDROBE_SELECTION_FIELDS)
+        present_wardrobe_fields = wardrobe_fields & set(fieldnames)
+        if present_wardrobe_fields and present_wardrobe_fields != wardrobe_fields:
+            raise ValueError(
+                "Manifest has a partial two-round wardrobe schema; missing "
+                f"{sorted(wardrobe_fields - present_wardrobe_fields)}"
+            )
+        execution_background_fields = set(EXECUTION_BACKGROUND_FIELDS)
+        present_execution_background_fields = execution_background_fields & set(fieldnames)
+        if (
+            present_execution_background_fields
+            and present_execution_background_fields != execution_background_fields
+        ):
+            raise ValueError(
+                "Manifest has a partial execution/background schema; missing "
+                f"{sorted(execution_background_fields - present_execution_background_fields)}"
+            )
+        generation_backend_fields = set(GENERATION_BACKEND_FIELDS)
+        present_generation_backend_fields = generation_backend_fields & set(fieldnames)
+        if (
+            present_generation_backend_fields
+            and present_generation_backend_fields != generation_backend_fields
+        ):
+            raise ValueError(
+                "Manifest has a partial generation-backend schema; missing "
+                f"{sorted(generation_backend_fields - present_generation_backend_fields)}"
+            )
         seen: dict[str, int] = {}
         seen_casefold: dict[str, tuple[str, int]] = {}
         seen_numeric: dict[int, tuple[str, int]] = {}
@@ -56,6 +121,9 @@ def read_manifest(path: Path) -> tuple[list[str], list[dict[str, str]]]:
                 "character_id",
                 "character_profile_version",
                 "character_profile_sha256",
+                *WARDROBE_SELECTION_FIELDS,
+                *EXECUTION_BACKGROUND_FIELDS,
+                *GENERATION_BACKEND_FIELDS,
             ):
                 value = row.get(exact_field, "")
                 if value != value.strip():
@@ -109,6 +177,226 @@ def read_manifest(path: Path) -> tuple[list[str], list[dict[str, str]]]:
             row["_source_line"] = str(source_line)
             rows.append(row)
     return fieldnames, rows
+
+
+def validate_wardrobe_provenance(row: dict[str, str]) -> list[str]:
+    """Validate one row's two-round selection record without inferring aesthetics."""
+    errors: list[str] = []
+    policy = row.get("wardrobe_policy", "")
+    method = row.get("wardrobe_recommendation_method", "")
+    identifier = row.get("number", "?")
+    if method not in WARDROBE_RECOMMENDATION_METHODS:
+        return [f"{identifier}: invalid wardrobe_recommendation_method {method!r}"]
+
+    if policy in {"fixed", "none"}:
+        expected_na = (
+            "wardrobe_library_version",
+            "wardrobe_evidence_basis",
+            "color_direction_id",
+            "color_direction_label",
+            "style_family_id",
+            "style_family_label",
+            "wardrobe_custom_override",
+        )
+        if method != "not-applicable":
+            errors.append(f"{identifier}: {policy} wardrobe must use not-applicable recommendation method")
+        for field in expected_na:
+            if row.get(field, "").casefold() != "not-applicable":
+                errors.append(f"{identifier}: {policy} wardrobe requires {field}=not-applicable")
+        for field in ("color_choice_round", "color_choice_option", "style_choice_round", "style_choice_option"):
+            if row.get(field, "") != "0":
+                errors.append(f"{identifier}: {policy} wardrobe requires {field}=0")
+        if row.get("wardrobe_recommendation_fingerprint", "") != "0" * 64:
+            errors.append(f"{identifier}: {policy} wardrobe requires a zero recommendation fingerprint")
+        return errors
+
+    if method == "not-applicable":
+        errors.append(f"{identifier}: varied wardrobe requires a selected color and style direction")
+        return errors
+    if not row.get("wardrobe_library_version", ""):
+        errors.append(f"{identifier}: wardrobe_library_version is empty")
+    digest = row.get("wardrobe_recommendation_fingerprint", "").casefold()
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        errors.append(f"{identifier}: wardrobe_recommendation_fingerprint is invalid")
+    if not row.get("wardrobe_evidence_basis", ""):
+        errors.append(f"{identifier}: wardrobe_evidence_basis is empty")
+    if not row.get("color_direction_label", "") or not row.get("style_family_label", ""):
+        errors.append(f"{identifier}: color/style labels must be recorded")
+
+    color_id = row.get("color_direction_id", "").upper()
+    style_id = row.get("style_family_id", "").upper()
+    if method == "model-curated":
+        if not re.fullmatch(r"C\d{2}", color_id):
+            errors.append(f"{identifier}: model-curated color_direction_id is invalid")
+        if not re.fullmatch(r"S\d{2}", style_id):
+            errors.append(f"{identifier}: model-curated style_family_id is invalid")
+        if row.get("wardrobe_custom_override", ""):
+            errors.append(f"{identifier}: model-curated selection must leave wardrobe_custom_override empty")
+        numeric_constraints = {
+            "color_choice_round": (1, None),
+            "color_choice_option": (1, 3),
+            "style_choice_round": (1, None),
+            "style_choice_option": (1, 3),
+        }
+    else:
+        if color_id != "CUSTOM" and not re.fullmatch(r"C\d{2}", color_id):
+            errors.append(f"{identifier}: user-specified color_direction_id is invalid")
+        if style_id != "CUSTOM" and not re.fullmatch(r"S\d{2}", style_id):
+            errors.append(f"{identifier}: user-specified style_family_id is invalid")
+        if not row.get("wardrobe_custom_override", ""):
+            errors.append(f"{identifier}: user-specified selection must record wardrobe_custom_override")
+        numeric_constraints = {
+            "color_choice_round": (0, None),
+            "color_choice_option": (0, 3),
+            "style_choice_round": (0, None),
+            "style_choice_option": (0, 3),
+        }
+
+    for field, (minimum, maximum) in numeric_constraints.items():
+        try:
+            value = int(row.get(field, ""))
+        except ValueError:
+            errors.append(f"{identifier}: {field} is not an integer")
+            continue
+        if value < minimum or (maximum is not None and value > maximum):
+            errors.append(f"{identifier}: {field} is outside its allowed range")
+    return errors
+
+
+def validate_execution_background_rows(rows: list[dict[str, str]]) -> list[str]:
+    """Validate the user-selected concurrency policy and background mode."""
+    errors: list[str] = []
+    for row in rows:
+        identifier = row.get("number", "?")
+        subagent_policy = row.get("subagent_parallelism", "").strip().casefold()
+        if subagent_policy not in SUBAGENT_PARALLELISM_CHOICES:
+            errors.append(
+                f"{identifier}: subagent_parallelism must be enabled, disabled, or custom"
+            )
+        concurrency_text = row.get("subagent_concurrency", "").strip()
+        try:
+            concurrency = int(concurrency_text)
+        except ValueError:
+            errors.append(f"{identifier}: subagent_concurrency must be a positive integer")
+            concurrency = None
+        if concurrency is not None:
+            if concurrency < 1:
+                errors.append(
+                    f"{identifier}: subagent_concurrency must be a positive integer"
+                )
+            elif subagent_policy == "enabled" and concurrency != DEFAULT_SUBAGENT_CONCURRENCY:
+                errors.append(
+                    f"{identifier}: enabled requires "
+                    f"subagent_concurrency={DEFAULT_SUBAGENT_CONCURRENCY}"
+                )
+            elif subagent_policy == "disabled" and concurrency != 1:
+                errors.append(
+                    f"{identifier}: disabled requires subagent_concurrency=1"
+                )
+
+        background_mode = row.get("background_mode", "").strip().casefold()
+        treatment = " ".join(
+            row.get("background_treatment", "").strip().casefold().split()
+        )
+        if background_mode not in BACKGROUND_MODES:
+            errors.append(
+                f"{identifier}: background_mode must be auto-varied or pure-white"
+            )
+        elif background_mode == "pure-white":
+            if treatment != "pure-white":
+                errors.append(
+                    f"{identifier}: pure-white mode requires background_treatment=pure-white"
+                )
+        elif not treatment or treatment == "pure-white":
+            errors.append(
+                f"{identifier}: auto-varied mode requires a non-white recorded background_treatment"
+            )
+
+    subagent_policies = {
+        row.get("subagent_parallelism", "").strip().casefold() for row in rows
+    }
+    if len(subagent_policies) > 1:
+        errors.append(
+            "Batch contains multiple subagent_parallelism values: "
+            f"{sorted(subagent_policies)}"
+        )
+    subagent_concurrencies = {
+        row.get("subagent_concurrency", "").strip() for row in rows
+    }
+    if len(subagent_concurrencies) > 1:
+        errors.append(
+            "Batch contains multiple subagent_concurrency values: "
+            f"{sorted(subagent_concurrencies)}"
+        )
+
+    background_modes = {
+        row.get("background_mode", "").strip().casefold() for row in rows
+    }
+    if len(background_modes) > 1:
+        errors.append(
+            f"Batch contains multiple background_mode values: {sorted(background_modes)}"
+        )
+    elif background_modes == {"auto-varied"}:
+        treatments = [
+            " ".join(row.get("background_treatment", "").strip().casefold().split())
+            for row in rows
+        ]
+        for left, right, left_row, right_row in zip(
+            treatments,
+            treatments[1:],
+            rows,
+            rows[1:],
+        ):
+            if left == right:
+                errors.append(
+                    f"{left_row['number']}/{right_row['number']}: consecutive auto-varied "
+                    "background treatments repeat"
+                )
+        if len(rows) < 4 and len(treatments) != len(set(treatments)):
+            errors.append("Short auto-varied batch must use a distinct background per card")
+        for offset in range(0, len(rows) - 3):
+            window = treatments[offset : offset + 4]
+            if len(set(window)) < 4:
+                errors.append(
+                    f"{rows[offset]['number']}-{rows[offset + 3]['number']}: four-card "
+                    "window must use four distinct auto-varied background treatments"
+                )
+    return errors
+
+
+def validate_generation_backend_rows(rows: list[dict[str, str]]) -> list[str]:
+    """Validate one explicit, stable generation model/interface choice."""
+    errors: list[str] = []
+    for row in rows:
+        identifier = row.get("number", "?")
+        mode = row.get("generation_backend_mode", "").strip().casefold()
+        interface = row.get("generation_interface", "").strip()
+        model = row.get("generation_model", "").strip()
+        if mode not in GENERATION_BACKEND_MODES:
+            errors.append(
+                f"{identifier}: generation_backend_mode must be recommended or custom"
+            )
+        if not interface:
+            errors.append(f"{identifier}: generation_interface is empty")
+        if not model:
+            errors.append(f"{identifier}: generation_model is empty")
+        if mode == "recommended":
+            if interface != RECOMMENDED_GENERATION_INTERFACE:
+                errors.append(
+                    f"{identifier}: recommended backend requires "
+                    f"generation_interface={RECOMMENDED_GENERATION_INTERFACE}"
+                )
+            if model != RECOMMENDED_GENERATION_MODEL:
+                errors.append(
+                    f"{identifier}: recommended backend requires "
+                    f"generation_model={RECOMMENDED_GENERATION_MODEL}"
+                )
+
+    for field in GENERATION_BACKEND_FIELDS:
+        values = {row.get(field, "").strip() for row in rows}
+        if len(values) > 1:
+            errors.append(f"Batch contains multiple {field} values: {sorted(values)}")
+    return errors
 
 
 def select_rows(

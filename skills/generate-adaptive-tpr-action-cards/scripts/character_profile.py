@@ -4,15 +4,19 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import csv
 import hashlib
 import itertools
 import json
-import random
 import re
 from pathlib import Path
 
-from batch_common import read_manifest
+from batch_common import (
+    WARDROBE_SELECTION_FIELDS,
+    read_manifest,
+    validate_wardrobe_provenance,
+)
 
 
 PROFILE_FIELDS = [
@@ -76,7 +80,20 @@ GENDER_PRESENTATIONS = {
 }
 CONFIDENCES = {"low", "medium", "high", "not-applicable"}
 WARDROBE_POLICIES = {"varied", "signature-variants", "fixed", "none"}
-ADAPTATION_MODES = {"recommend", "random", "specified"}
+ADAPTATION_MODES = {"recommend", "specified"}
+# These are optional action-safe styling details used when a batch is longer
+# than the profile's base color/silhouette/style combinations.  They keep the
+# complete outfit text unique while the audited factor fields stay in-pool.
+OUTFIT_DETAIL_VARIANTS = (
+    "tonal piping",
+    "textured knit finish",
+    "soft pleat detail",
+    "minimal belt detail",
+    "rolled cuff detail",
+    "utility pocket accents",
+    "ribbed fabric finish",
+    "structured collar detail",
+)
 ADAPTATION_STATUSES = {"pass", "fallback", "blocked"}
 ADAPTATION_REASONS = {
     "ok",
@@ -112,8 +129,14 @@ def parse_args() -> argparse.Namespace:
     suggest = subparsers.add_parser("suggest")
     suggest.add_argument("profile_csv", type=Path)
     suggest.add_argument("--character-id", required=True)
-    suggest.add_argument("--mode", choices=["recommend", "random"], required=True)
+    suggest.add_argument(
+        "--mode",
+        choices=["recommend", "specified"],
+        required=True,
+        help="Final batch mode. Wardrobe recommendations are handled by the two-round chooser.",
+    )
     suggest.add_argument("--seed")
+    suggest.add_argument("--persona")
     suggest.add_argument("--count", type=int, required=True)
     return parser.parse_args()
 
@@ -260,9 +283,15 @@ def validate_profile_row(row: dict[str, str], line: int) -> list[str]:
     styles = split_values(row.get("outfit_style_options", ""))
     signature = row.get("signature_outfit", "")
     if policy in {"varied", "signature-variants"}:
-        if min(len(palette), len(silhouettes), len(styles)) < 2:
+        required_pool_size = 4 if policy == "varied" else 2
+        if min(len(palette), len(silhouettes), len(styles)) < required_pool_size:
             errors.append(
-                f"{label}: {policy} requires at least two palette, silhouette, and style options"
+                f"{label}: {policy} requires at least {required_pool_size} palette, silhouette, and style options"
+            )
+        minimum_palette = 4 if policy == "varied" else 3
+        if len(palette) < minimum_palette:
+            errors.append(
+                f"{label}: {policy} requires at least {minimum_palette} palette values for broad in-range diversity"
             )
         if policy == "signature-variants" and not signature:
             errors.append(f"{label}: signature-variants requires signature_outfit")
@@ -342,12 +371,13 @@ def validate_manifest_profiles(
         "suitability_handling",
         "adaptation_status",
         "adaptation_reason",
+        *WARDROBE_SELECTION_FIELDS,
     }
     missing = sorted(required_fields - set(fieldnames))
     if missing:
         return [f"Manifest is missing character-adaptation fields {missing}"]
 
-    batch_values: dict[str, tuple[str, str, str, str, str]] = {}
+    batch_values: dict[str, tuple[str, ...]] = {}
     for row in rows:
         identifier = row["number"]
         character_id = row.get("character_id", "")
@@ -365,15 +395,12 @@ def validate_manifest_profiles(
         mode = row.get("adaptation_mode", "")
         if mode not in ADAPTATION_MODES:
             errors.append(f"{identifier}: invalid adaptation_mode {mode!r}")
-        if mode == "random" and not row.get("adaptation_seed"):
-            errors.append(f"{identifier}: random adaptation requires adaptation_seed")
-        candidates = {value.casefold() for value in split_values(profile["persona_candidates"])}
         if mode == "recommend" and row.get("persona") != profile.get("recommended_persona"):
             errors.append(f"{identifier}: recommend mode must use recommended_persona")
-        elif mode == "random" and row.get("persona", "").casefold() not in candidates:
-            errors.append(f"{identifier}: random persona is outside persona_candidates")
         elif mode == "specified" and not row.get("persona"):
             errors.append(f"{identifier}: specified mode requires persona")
+
+        errors.extend(validate_wardrobe_provenance(row))
 
         required_caps = split_values(row.get("required_render_capabilities", ""))
         if not required_caps:
@@ -408,11 +435,12 @@ def validate_manifest_profiles(
             mode,
             row.get("adaptation_seed", ""),
             row.get("persona", ""),
+            *(row.get(field, "") for field in WARDROBE_SELECTION_FIELDS),
         )
         prior = batch_values.setdefault(character_id, values)
         if prior != values:
             errors.append(
-                f"{identifier}: profile version, hash, mode, seed, and persona must be stable "
+                f"{identifier}: profile, mode, persona, and two-round wardrobe selection must be stable "
                 f"for character {character_id}"
             )
     return errors
@@ -422,8 +450,75 @@ def difference_count(left: tuple[str, str, str], right: tuple[str, str, str]) ->
     return sum(a.casefold() != b.casefold() for a, b in zip(left, right))
 
 
+def build_diverse_sequence(
+    combinations: list[tuple[str, str, str]],
+    count: int,
+    *,
+    require_cycle_boundary: bool,
+) -> list[tuple[str, str, str]]:
+    """Greedily maximize visible factor distance and balanced pool coverage."""
+    if not combinations or count < 1 or count > len(combinations):
+        raise ValueError("Invalid wardrobe combination count")
+    color_count = len({item[0].casefold() for item in combinations})
+    start_attempts = min(len(combinations), 64)
+    for start_index in range(start_attempts):
+        pool = list(combinations)
+        first = pool.pop(start_index)
+        selected = [first]
+        usage = [Counter({first[index].casefold(): 1}) for index in range(3)]
+        while pool and len(selected) < count:
+            eligible: list[tuple[int, tuple[str, str, str]]] = []
+            for pool_index, item in enumerate(pool):
+                if difference_count(selected[-1], item) < 2:
+                    continue
+                if color_count >= 2 and item[0].casefold() == selected[-1][0].casefold():
+                    continue
+                is_last = len(selected) + 1 == count
+                if require_cycle_boundary and is_last:
+                    if difference_count(item, first) < 2:
+                        continue
+                    if color_count >= 2 and item[0].casefold() == first[0].casefold():
+                        continue
+                eligible.append((pool_index, item))
+            if not eligible:
+                break
+
+            def score(candidate: tuple[int, tuple[str, str, str]]) -> tuple[int, ...]:
+                pool_index, item = candidate
+                changed = difference_count(selected[-1], item)
+                fresh_dimensions = sum(
+                    usage[index][value.casefold()] == 0
+                    for index, value in enumerate(item)
+                )
+                recent_distance = min(
+                    difference_count(item, prior) for prior in selected[-8:]
+                )
+                dimension_usage = [
+                    usage[index][value.casefold()] for index, value in enumerate(item)
+                ]
+                return (
+                    changed,
+                    fresh_dimensions,
+                    recent_distance,
+                    -max(dimension_usage),
+                    -sum(dimension_usage),
+                    -pool_index,
+                )
+
+            _, chosen = max(eligible, key=score)
+            selected.append(chosen)
+            pool.remove(chosen)
+            for index, value in enumerate(chosen):
+                usage[index][value.casefold()] += 1
+        if len(selected) == count:
+            return selected
+    raise ValueError(
+        "Could not arrange wardrobe factors with maximum feasible coverage and safe adjacency"
+    )
+
+
 def choose_factor_sequence(
-    profile: dict[str, str], count: int, mode: str, seed: str | None
+    profile: dict[str, str], count: int
 ) -> list[tuple[str, str, str]]:
     policy = profile["wardrobe_policy"]
     if policy == "fixed":
@@ -436,45 +531,37 @@ def choose_factor_sequence(
     styles = split_values(profile["outfit_style_options"])
     combinations = list(itertools.product(palette, silhouettes, styles))
     if count > len(combinations):
-        raise ValueError(
-            f"Wardrobe pools provide {len(combinations)} unique combinations, fewer than {count}"
+        cycle = build_diverse_sequence(
+            combinations,
+            len(combinations),
+            require_cycle_boundary=True,
         )
-    stable_seed = seed or f"recommend:{profile['character_id']}:{profile['_profile_sha256']}"
-    for attempt in range(128):
-        pool = list(combinations)
-        rng = random.Random(f"{stable_seed}:{attempt}")
-        if mode == "random" or attempt:
-            rng.shuffle(pool)
-        selected = [pool.pop(0)]
-        while pool and len(selected) < count:
-            eligible = [item for item in pool if difference_count(selected[-1], item) >= 2]
-            if not eligible:
-                break
-            if mode == "random" or attempt:
-                chosen = rng.choice(eligible)
-            else:
-                chosen = eligible[0]
-            selected.append(chosen)
-            pool.remove(chosen)
-        if len(selected) == count:
-            return selected
-    raise ValueError(
-        "Could not arrange wardrobe factors so every consecutive pair differs in two dimensions"
+        return [cycle[index % len(cycle)] for index in range(count)]
+    return build_diverse_sequence(
+        combinations,
+        count,
+        require_cycle_boundary=False,
     )
 
 
-def suggest(profile: dict[str, str], mode: str, seed: str | None, count: int) -> dict[str, object]:
+def suggest(
+    profile: dict[str, str],
+    mode: str,
+    seed: str | None,
+    count: int,
+    persona_override: str | None = None,
+) -> dict[str, object]:
     if count < 1:
         raise ValueError("--count must be at least 1")
-    if mode == "random" and not seed:
-        raise ValueError("--seed is required for random mode")
-    candidates = split_values(profile["persona_candidates"])
-    if mode == "recommend":
-        persona = profile["recommended_persona"]
-    else:
-        persona = random.Random(seed).choice(candidates)
-    factors = choose_factor_sequence(profile, count, mode, seed)
+    if mode not in ADAPTATION_MODES:
+        raise ValueError(f"Unsupported adaptation mode {mode!r}")
+    effective_seed = seed or ""
+    persona = persona_override or profile["recommended_persona"]
+    if mode == "recommend" and persona != profile["recommended_persona"]:
+        raise ValueError("recommend mode must use the profile's recommended_persona")
+    factors = choose_factor_sequence(profile, count)
     outfits: list[dict[str, object]] = []
+    factor_occurrences: dict[tuple[str, str, str], int] = {}
     for index, (color, silhouette, style) in enumerate(factors, start=1):
         if profile["wardrobe_policy"] == "none":
             description = "not-applicable"
@@ -486,6 +573,16 @@ def suggest(profile: dict[str, str], mode: str, seed: str | None, count: int) ->
             )
         else:
             description = "; ".join([color, silhouette, style])
+        if profile["wardrobe_policy"] in {"varied", "signature-variants"}:
+            factor_key = (color, silhouette, style)
+            occurrence = factor_occurrences.get(factor_key, 0)
+            factor_occurrences[factor_key] = occurrence + 1
+            if occurrence:
+                if occurrence <= len(OUTFIT_DETAIL_VARIANTS):
+                    detail = OUTFIT_DETAIL_VARIANTS[occurrence - 1]
+                else:
+                    detail = f"tailored variation {occurrence + 1:03d}"
+                description = f"{description}; {detail}"
         outfits.append(
             {
                 "index": index,
@@ -500,7 +597,7 @@ def suggest(profile: dict[str, str], mode: str, seed: str | None, count: int) ->
         "profile_version": profile["profile_version"],
         "character_profile_sha256": profile["_profile_sha256"],
         "adaptation_mode": mode,
-        "adaptation_seed": seed or "",
+        "adaptation_seed": effective_seed,
         "persona": persona,
         "wardrobe_policy": profile["wardrobe_policy"],
         "outfits": outfits,
@@ -543,7 +640,7 @@ def main() -> int:
         raise ValueError(f"Unknown character_id {args.character_id!r}")
     print(
         json.dumps(
-            suggest(profile, args.mode, args.seed, args.count),
+            suggest(profile, args.mode, args.seed, args.count, args.persona),
             ensure_ascii=True,
             indent=2,
         )

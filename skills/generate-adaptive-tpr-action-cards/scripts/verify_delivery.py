@@ -13,7 +13,15 @@ from pathlib import Path, PurePosixPath
 
 from PIL import Image, ImageChops
 
-from batch_common import expected_card_map, read_manifest, select_rows, sha256_file
+from batch_common import (
+    expected_card_map,
+    read_manifest,
+    select_rows,
+    sha256_file,
+    validate_execution_background_rows,
+    validate_generation_backend_rows,
+    validate_wardrobe_provenance,
+)
 from character_profile import (
     SUITABILITY_HANDLINGS,
     load_profiles,
@@ -30,10 +38,16 @@ from compose_a4_card import (
     pixel_sha256,
     render_caption_strip,
 )
+from wardrobe_choice import (
+    DEFAULT_LIBRARY as DEFAULT_WARDROBE_LIBRARY,
+    load_library as load_wardrobe_library,
+    validate_model_curated_binding,
+)
 
 
 LEGACY_NUMBER_RE = re.compile(r"^(\d+)_.*_A4\.png$", re.IGNORECASE)
 QA_PASS_VALUES = {"pass", "passed"}
+WARDROBE_LIBRARY = load_wardrobe_library(DEFAULT_WARDROBE_LIBRARY)
 
 
 def parse_args() -> argparse.Namespace:
@@ -92,10 +106,8 @@ def verify_manifest_gate(row: dict[str, str]) -> list[str]:
         errors.append("character_profile_version is empty")
     if len(row.get("character_profile_sha256", "")) != 64:
         errors.append("character_profile_sha256 is invalid")
-    if row.get("adaptation_mode") not in {"recommend", "random", "specified"}:
+    if row.get("adaptation_mode") not in {"recommend", "specified"}:
         errors.append("adaptation_mode is invalid")
-    if row.get("adaptation_mode") == "random" and not row.get("adaptation_seed"):
-        errors.append("random adaptation_seed is empty")
     if not row.get("persona"):
         errors.append("persona is empty")
     if row.get("wardrobe_policy") not in {
@@ -121,6 +133,10 @@ def verify_manifest_gate(row: dict[str, str]) -> list[str]:
         errors.append("diversity_plan_status is not pass")
     if row.get("diversity_visual_status", "").casefold() not in QA_PASS_VALUES:
         errors.append("diversity_visual_status is not pass")
+    errors.extend(validate_wardrobe_provenance(row))
+    errors.extend(validate_model_curated_binding(row, WARDROBE_LIBRARY))
+    errors.extend(validate_execution_background_rows([row]))
+    errors.extend(validate_generation_backend_rows([row]))
     return errors
 
 
@@ -141,6 +157,8 @@ def verify_manifest_profile_binding(
         ]
     profiles, errors = load_profiles(profile_path)
     errors.extend(validate_manifest_profiles(profiles, manifest, selected_rows=rows))
+    errors.extend(validate_execution_background_rows(rows))
+    errors.extend(validate_generation_backend_rows(rows))
     character_ids = {row.get("character_id", "") for row in rows}
     if len(character_ids) != 1:
         errors.append(

@@ -26,8 +26,11 @@ from verify_delivery import verify_card, verify_manifest_gate, verify_manifest_p
 NUMBER_RE = re.compile(r"^(\d+)_.*_A4\.png$", re.IGNORECASE)
 PAGE_WIDTH_MM = 210
 PAGE_HEIGHT_MM = 297
-CARD_HEIGHT_MM = 147.45
-ROW_HEIGHT_MM = 147.80
+# Leave a small amount of vertical slack for WPS' required trailing layout
+# paragraph.  Keeping the image just below the row height preserves the full
+# A4 card while avoiding a spurious blank second page in WPS.
+CARD_HEIGHT_MM = 146.25
+ROW_HEIGHT_MM = 146.60
 TABLE_WIDTH_TWIPS = 11906
 COL_WIDTH_TWIPS = TABLE_WIDTH_TWIPS // 2
 IDENTIFIER_CLEAR_TOP = 1450
@@ -359,6 +362,17 @@ def add_page_break(document: Document):
     run.add_break(WD_BREAK.PAGE)
 
 
+def add_trailing_layout_paragraph(document: Document):
+    """Keep WPS' required trailing paragraph inside the final A4 page."""
+    paragraph = document.add_paragraph()
+    paragraph.paragraph_format.space_before = Pt(0)
+    paragraph.paragraph_format.space_after = Pt(0)
+    paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
+    paragraph.paragraph_format.line_spacing = Pt(1)
+    run = paragraph.add_run()
+    run.font.size = Pt(1)
+
+
 def add_card_page(document: Document, sources: list[Path]):
     table = document.add_table(rows=2, cols=2)
     set_table_geometry(table)
@@ -411,6 +425,7 @@ def main():
         add_card_page(document, sources[offset:offset + 4])
         if (offset + 4) % 20 == 0 or offset + 4 == len(sources):
             print(f"embedded {offset + 4}/{len(sources)}", flush=True)
+    add_trailing_layout_paragraph(document)
 
     core = document.core_properties
     first_identifier = source_specs[0]["number"]

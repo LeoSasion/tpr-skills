@@ -11,13 +11,23 @@ from pathlib import Path
 
 from batch_common import (
     DELIVERY_CHOICES,
+    EXECUTION_BACKGROUND_FIELDS,
+    GENERATION_BACKEND_FIELDS,
+    WARDROBE_SELECTION_FIELDS,
     WORD_IDENTIFIER_VISIBILITIES,
     atomic_write_csv,
     read_manifest,
     select_rows,
+    validate_execution_background_rows,
+    validate_generation_backend_rows,
 )
 from character_profile import load_profiles, split_values, validate_manifest_profiles
 from validate_action_library import load_validated_library, load_validated_suitability
+from wardrobe_choice import (
+    DEFAULT_LIBRARY as DEFAULT_WARDROBE_LIBRARY,
+    load_library as load_wardrobe_library,
+    validate_model_curated_binding,
+)
 
 
 REQUIRED_PLAN_FIELDS = [
@@ -47,6 +57,13 @@ REQUIRED_PLAN_FIELDS = [
     "outfit_silhouette",
     "outfit_style",
     "word_identifier_visibility",
+    *EXECUTION_BACKGROUND_FIELDS,
+    *GENERATION_BACKEND_FIELDS,
+    *[
+        field
+        for field in WARDROBE_SELECTION_FIELDS
+        if field != "wardrobe_custom_override"
+    ],
 ]
 
 
@@ -57,6 +74,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--library", type=Path)
     parser.add_argument("--suitability", type=Path)
     parser.add_argument("--semantics", type=Path)
+    parser.add_argument("--wardrobe-library", type=Path, default=DEFAULT_WARDROBE_LIBRARY)
     parser.add_argument("--start", type=int)
     parser.add_argument("--end", type=int)
     parser.add_argument("--id", dest="identifiers", action="append", default=[])
@@ -141,10 +159,13 @@ def validate_rows(
     library: dict[str, dict[str, str]],
     suitability: dict[str, dict[str, str]] | None,
     profiles: dict[str, dict[str, str]],
+    wardrobe_library: dict[str, dict[str, str]],
 ) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
     output_names: dict[str, str] = {}
+    errors.extend(validate_execution_background_rows(rows))
+    errors.extend(validate_generation_backend_rows(rows))
 
     for row in rows:
         identifier = row["number"]
@@ -219,6 +240,7 @@ def validate_rows(
 
         profile = profiles.get(row.get("character_id", ""))
         if profile is not None:
+            errors.extend(validate_model_curated_binding(row, wardrobe_library))
             policy = profile.get("wardrobe_policy")
             mode = row.get("adaptation_mode")
             outfit_values = {
@@ -245,21 +267,20 @@ def validate_rows(
                     errors.append(
                         f"{identifier}: signature-variant outfit omits signature_outfit"
                     )
-                if mode in {"recommend", "random"}:
-                    pools = {
-                        "outfit_color": split_values(profile.get("outfit_palette_options", "")),
-                        "outfit_silhouette": split_values(
-                            profile.get("outfit_silhouette_options", "")
-                        ),
-                        "outfit_style": split_values(profile.get("outfit_style_options", "")),
-                    }
-                    for field, values in pools.items():
-                        if normalized(row.get(field, "")) not in {
-                            normalized(value) for value in values
-                        }:
-                            errors.append(
-                                f"{identifier}: {field} is outside the approved character-profile pool"
-                            )
+                pools = {
+                    "outfit_color": split_values(profile.get("outfit_palette_options", "")),
+                    "outfit_silhouette": split_values(
+                        profile.get("outfit_silhouette_options", "")
+                    ),
+                    "outfit_style": split_values(profile.get("outfit_style_options", "")),
+                }
+                for field, values in pools.items():
+                    if normalized(row.get(field, "")) not in {
+                        normalized(value) for value in values
+                    }:
+                        errors.append(
+                            f"{identifier}: {field} is outside the selected-range character-profile pool"
+                        )
 
     character_ids = {row.get("character_id", "") for row in rows}
     if len(character_ids) > 1:
@@ -288,6 +309,33 @@ def validate_rows(
             errors.append(f"{row['number']}: full outfit repeats {outfit_seen[key]}")
         else:
             outfit_seen[key] = row["number"]
+
+    if varied_rows:
+        profile = profiles.get(varied_rows[0].get("character_id", ""))
+        if profile is not None:
+            pools = {
+                "outfit_color": split_values(profile.get("outfit_palette_options", "")),
+                "outfit_silhouette": split_values(
+                    profile.get("outfit_silhouette_options", "")
+                ),
+                "outfit_style": split_values(profile.get("outfit_style_options", "")),
+            }
+            for field, values in pools.items():
+                normalized_pool = [normalized(value) for value in values]
+                observed = [normalized(row.get(field, "")) for row in varied_rows]
+                required_unique = min(len(normalized_pool), len(varied_rows))
+                actual_unique = len(set(observed))
+                if actual_unique < required_unique:
+                    errors.append(
+                        f"Batch uses only {actual_unique}/{required_unique} feasible distinct {field} values; "
+                        "cover the selected range before reuse"
+                    )
+                if len(varied_rows) >= len(normalized_pool) * 2:
+                    counts = [observed.count(value) for value in normalized_pool]
+                    if counts and max(counts) - min(counts) > 1:
+                        errors.append(
+                            f"Batch {field} usage is unbalanced {counts}; complete balanced coverage cycles"
+                        )
 
     for left, right in zip(rows, rows[1:]):
         left_combo = (normalized(left.get("head_angle", "")), normalized(left.get("gaze", "")))
@@ -318,6 +366,34 @@ def validate_rows(
             errors.append(f"{label}: four-card window has fewer than three head/gaze combinations")
         if len(expressions) < 4:
             errors.append(f"{label}: four-card window does not have four distinct expressions")
+        varied_window = [
+            row
+            for row in window
+            if row.get("wardrobe_policy") in {"varied", "signature-variants"}
+        ]
+        if len(varied_window) == 4:
+            profile = profiles.get(varied_window[0].get("character_id", ""))
+            if profile is not None:
+                window_requirements = {
+                    "outfit_color": min(
+                        4, len(split_values(profile.get("outfit_palette_options", "")))
+                    ),
+                    "outfit_silhouette": min(
+                        3, len(split_values(profile.get("outfit_silhouette_options", "")))
+                    ),
+                    "outfit_style": min(
+                        3, len(split_values(profile.get("outfit_style_options", "")))
+                    ),
+                }
+                for field, required_unique in window_requirements.items():
+                    actual_unique = len(
+                        {normalized(row.get(field, "")) for row in varied_window}
+                    )
+                    if actual_unique < required_unique:
+                        errors.append(
+                            f"{label}: four-card window uses only {actual_unique}/{required_unique} "
+                            f"feasible distinct {field} values"
+                        )
 
     if len(rows) < 4:
         expressions = [normalized(row.get("expression", "")) for row in rows]
@@ -353,7 +429,15 @@ def main() -> int:
         else None
     )
     profiles, profile_errors = load_profiles(args.character_profile)
-    errors, warnings = validate_rows(rows, semantics, library, suitability, profiles)
+    wardrobe_library = load_wardrobe_library(args.wardrobe_library)
+    errors, warnings = validate_rows(
+        rows,
+        semantics,
+        library,
+        suitability,
+        profiles,
+        wardrobe_library,
+    )
     if args.suitability and not args.library:
         warnings.append("--suitability has no effect without --library")
     elif args.library and not suitability_path:
