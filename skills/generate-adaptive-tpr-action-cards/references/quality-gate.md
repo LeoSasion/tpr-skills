@@ -14,8 +14,9 @@ Inspect the final A4 card, not only the raw generated image. A card passes only 
 ## Deterministic gate
 
 - The recorded reference exists in the photo pool, belongs to the manifest's `character_id`, is an approved original, and matches `reference_sha256`.
-- The approved profile version and computed `character_profile_sha256` match every selected manifest row; adaptation mode, persona, wardrobe policy, library version, model/user method, final fingerprint, evidence tokens, and both selected ranges are stable across the batch. For a model-curated current-version choice, the selected style belongs to the profile-derived clothing-presentation scope or `shared`; frozen legacy selections retain their original verification contract.
-- `subagent_parallelism`, positive-integer `subagent_concurrency`, and `background_mode` are explicit and stable across the batch. Enabled uses exactly `4`, disabled uses exactly `1`, and custom preserves the confirmed count. Every row records the actual `background_treatment`; white mode uses exactly `pure-white`, while auto-varied mode records a non-white treatment.
+- The approved profile version and computed `character_profile_sha256` match every selected manifest row. For v2, adaptation mode, persona, wardrobe policy, library version, model/user method, final fingerprint, evidence tokens, `wardrobe_selection_schema_version=2`, canonical `wardrobe_selected_ranges_json`, and `wardrobe_assignment_strategy=balanced-scattered-v1` are stable across the batch. Every selected style key belongs to the profile-derived clothing-presentation scope or `shared` unless it is an explicitly valid adult custom/cross-presentation choice. Frozen v1 single-selection records retain their verify-only contract and never drive new work.
+- Profile-v2 `wardrobe_range_pools_json` contains a separate approved factor pool for every selected range key. Each row has exactly one `assigned_color_direction_key` and one `assigned_style_family_key`, both belong to the stable selected sets, and every concrete outfit factor belongs to those two assigned pools. Option 4 never appears in selected JSON, assignments, pools, or the fingerprint.
+- `subagent_parallelism`, positive-integer `subagent_concurrency`, and `background_mode` are explicit and stable across the batch. Enabled uses exactly `4`, disabled uses exactly `1`, and custom preserves the confirmed count. `unspecified` requires an empty `background_treatment`; `pure-white` requires exactly `pure-white`; `specified` requires the user's non-empty treatment. Legacy `auto-varied` rows retain their recorded non-white treatments.
 - Under enabled or custom parallelism, execution uses the recorded number of image-generation child workers in addition to the primary agent. The primary remains orchestration-only and does not submit generation requests, own rows, or backfill a failed worker; a default run is one primary plus four child workers, never one primary plus three children.
 - `generation_backend_mode`, `generation_interface`, and `generation_model` are explicit and stable across the batch. The exact route passed a current capability/authentication check before planning; no model or interface was silently substituted, and no API key or token appears in the manifest, prompt, report, or log.
 - Required render capabilities are present, action risk tags are recorded, and `adaptation_status` is `pass` or an explained safe `fallback`.
@@ -44,12 +45,12 @@ Run `scripts/verify_delivery.py --character-profile ...` after visual QA has bee
 ### Persona and wardrobe
 
 - Persona is visibly useful art direction, not a claim about a real subject's personality, occupation, or identity.
-- The final batch uses the selected broad color direction, selected broad style family, and post-selection approved profile factors. Recommendation evidence is non-sensitive, the options were model-curated rather than shuffled, and the style was eligible for the resolved group or explicitly recorded as user-specified.
+- The final batch uses only the canonical selected color/style sets and post-selection profile-v2 range pools. Each card visibly follows one assigned color range and one assigned style range; it never mixes two color ranges or two style ranges in the same dimension. Recommendation evidence is non-sensitive, the options were model-curated rather than shuffled, and every assigned style was eligible for the resolved group or explicitly recorded as a valid user-specified adult choice.
 - A user-specified adult library ID may cross masculine/feminine presentation groups inside the adult age domain, and adult `CUSTOM` text is fingerprint-bound exactly as written without an added safety classification. Infant, toddler, child, teen, juvenile, and age-uncertain profiles never accept user-specified/CUSTOM wardrobe text; they remain inside model-curated eligible minor-safe library rows unless clear adult confirmation changes the approved profile.
-- Both selected ranges remain visually coherent across the batch; sub-palettes, silhouettes, substyles, layers, materials, textures, trims, and restrained accessories must not drift outside them.
-- Every approved color, silhouette, and substyle is covered before reuse where action safety allows; explicit restrictions are honored.
+- Every selected range remains visually coherent across the batch; sub-palettes, silhouettes, substyles, layers, materials, textures, trims, and restrained accessories must not drift outside the current row's two assignments.
+- `balanced-scattered-v1` is reproducible from the same stable inputs, covers the color × style key pairs with counts differing by at most one when feasible, scatters pair order deterministically, and covers every approved assigned-pool color, silhouette, and substyle before reuse where action safety allows. Explicit restrictions are honored.
 - Minors and age-uncertain subjects remain age-appropriate and nonsexualized. Clearly adult-presenting subjects receive no Skill-level wardrobe safety review: do not fail, reduce, or override an adult outfit because of coverage, exposure, sensuality, garment type, sheer material, heels, swimwear, lingerie styling, or any other fashion-scale judgment. A backend's own hard refusal is reported as a backend limitation.
-- Every work packet was emitted by `scripts/build_work_packets.py` and passed `scripts/verify_work_packets.py` immediately before dispatch. The verifier rebuilds the expected object, so every field, `prompt_sha256`, profile/reference binding, and structured scope must match exactly. A clearly adult packet uses `adult-none`, has empty `minor_safety_notes` and `minor_avoid_features`, and contains none of the profile's child-safety free text because the builder never forwards those fields. A child or age-uncertain packet uses `minor-nonsexualized`. Never hand-edit or append wardrobe-safety language after the builder.
+- Every work packet was emitted by `scripts/build_work_packets.py` and passed `scripts/verify_work_packets.py` immediately before dispatch. The verifier rebuilds the expected object, so every field, `prompt_sha256`, profile/reference binding, and structured scope must match exactly. A clearly adult packet uses `adult-none` as metadata, has empty `minor_safety_notes` and `minor_avoid_features`, and its prompt contains neither child-safety free text nor explicit prose declaring absent coverage/exposure/sensuality restrictions. A child or age-uncertain packet uses `minor-nonsexualized`. An `unspecified` packet contains no background heading, label, placeholder, or sentence. Never hand-edit or append wardrobe-safety or background language after the builder.
 - Signature features remain visible. Action-critical joints, paws, hands, feet, face, wings, wheels, or tail are not obscured.
 - `fixed` and `none` wardrobe policies are followed exactly and are not penalized for repetition.
 
@@ -65,8 +66,10 @@ Run `scripts/verify_delivery.py --character-profile ...` after visual QA has bee
 
 ### Composition
 
+- Under `unspecified`, there is no planned background to match; do not fail a result merely because the model selected its own background. General readability and unwanted-text/extra-person checks still apply.
 - Under `pure-white`, the background is clean white with no border, scenery, accidental text, or unrelated prop.
-- Under `auto-varied`, the background visibly matches the recorded treatment, remains uncluttered and action-readable, gives the character sufficient contrast, and contains no accidental text, branding, unrelated people, or distracting scenery. It does not copy the uploaded reference background.
+- Under `specified`, the background visibly follows the user's exact request without introducing accidental text or unrelated people.
+- Under legacy `auto-varied`, the background visibly matches the recorded treatment and its historical diversity contract.
 - Full body and all action-critical limbs are visible and not clipped.
 - A necessary prop or partial partner cue is present but does not compete with the primary character.
 - No extra face or full additional person appears unless the user explicitly requested one.
@@ -83,7 +86,7 @@ Record visual failures with `scripts/batch_state.py visual --result fail`; do no
 - Long batches cover and balance every approved pool before starting another cycle. A plan-level label change that looks nearly identical in the images fails.
 - Under `fixed` or `none`, wardrobe repetition is expected; require diversity from pose, head/gaze, and expression instead.
 - Repeated reference photos do not produce repeated poses.
-- Under `auto-varied`, every feasible four-card window visibly uses four distinct background treatments. A label-only change or near-identical scene fails; under `pure-white`, background repetition is expected.
+- Under `unspecified`, background diversity is neither planned nor scored. Under `pure-white` or a repeated user-specified solid color, repetition is expected. Legacy `auto-varied` keeps its four-treatment diversity check.
 - A plan-level difference that is too subtle to see counts as a diversity failure.
 
 ## Packaging gate
@@ -127,7 +130,7 @@ Local existence, checksum, ZIP integrity, or a `sandbox:` path proves content on
 | `GEN_IDENTITY` | Choose another approved same-character original and reduce appearance changes. |
 | `GEN_ACTION` | Rewrite the motion chain and contrast the confusing neighboring action. |
 | `GEN_ANATOMY` | Specify support, joints, hand shape, and interaction geometry. |
-| `GEN_COMPOSITION`, `GEN_UNWANTED_ELEMENT` | Restore the selected background treatment, remove forbidden clutter or extra people, and keep only a necessary prop or partial cue. |
+| `GEN_COMPOSITION`, `GEN_UNWANTED_ELEMENT` | Restore an explicitly selected background when one exists, remove forbidden clutter or extra people, and keep only a necessary prop or partial cue. Do not invent a background correction under `unspecified`. |
 | `COMP_SIZE_DPI` | Recompose on the A4 canvas without stretching or cropping. |
 | `COMP_CAPTION`, `COMP_METADATA` | Re-run the compositor with exact manifest strings and approved font. |
 | `DIV_HEAD_GAZE`, `DIV_EXPRESSION`, `DIV_OUTFIT`, `DIV_BACKGROUND` | Change the failed visible dimension and re-check the four-card window. |

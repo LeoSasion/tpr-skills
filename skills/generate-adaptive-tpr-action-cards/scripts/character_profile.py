@@ -14,12 +14,14 @@ from pathlib import Path
 
 from batch_common import (
     WARDROBE_SELECTION_FIELDS,
+    WARDROBE_V2_ASSIGNMENT_FIELDS,
+    WARDROBE_V2_BATCH_FIELDS,
     read_manifest,
     validate_wardrobe_provenance,
 )
 
 
-PROFILE_FIELDS = [
+PROFILE_FIELDS_V1 = [
     "character_id",
     "profile_version",
     "character_kind",
@@ -46,6 +48,12 @@ PROFILE_FIELDS = [
     "analysis_basis",
     "status",
 ]
+PROFILE_FIELDS_V2 = [
+    *PROFILE_FIELDS_V1[: PROFILE_FIELDS_V1.index("signature_outfit")],
+    "wardrobe_range_pools_json",
+    *PROFILE_FIELDS_V1[PROFILE_FIELDS_V1.index("signature_outfit") :],
+]
+PROFILE_FIELDS = PROFILE_FIELDS_V2
 CHARACTER_KINDS = {
     "human",
     "animal",
@@ -207,6 +215,8 @@ def parse_args() -> argparse.Namespace:
         help="Final batch mode. Wardrobe recommendations are handled by the two-round chooser.",
     )
     suggest.add_argument("--seed")
+    suggest.add_argument("--selected-ranges-json")
+    suggest.add_argument("--assignment-seed")
     suggest.add_argument("--persona")
     suggest.add_argument("--count", type=int, required=True)
     return parser.parse_args()
@@ -214,6 +224,143 @@ def parse_args() -> argparse.Namespace:
 
 def split_values(value: str) -> list[str]:
     return [item.strip() for item in value.split(";") if item.strip()]
+
+
+def compact_json(payload: object) -> str:
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def parse_range_pools(value: str) -> dict[str, object]:
+    try:
+        raw = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError("wardrobe_range_pools_json is not valid JSON") from exc
+    if not isinstance(raw, dict) or set(raw) != {"colors", "styles"}:
+        raise ValueError(
+            "wardrobe_range_pools_json must contain exactly colors and styles"
+        )
+    colors = raw["colors"]
+    styles = raw["styles"]
+    if not isinstance(colors, dict) or not isinstance(styles, dict):
+        raise ValueError("wardrobe range colors/styles must be JSON objects")
+    canonical_colors: dict[str, list[str]] = {}
+    for key, raw_values in colors.items():
+        if not re.fullmatch(r"(?:C\d{2}|CUSTOM-C-[0-9A-F]{16})", str(key)):
+            raise ValueError(f"Invalid color range key {key!r}")
+        if not isinstance(raw_values, list) or not raw_values:
+            raise ValueError(f"Color range {key} must contain a non-empty array")
+        values = [str(item).strip() for item in raw_values]
+        if any(not item or ";" in item or "\n" in item or "\r" in item for item in values):
+            raise ValueError(f"Color range {key} contains an invalid factor value")
+        if len({item.casefold() for item in values}) != len(values):
+            raise ValueError(f"Color range {key} contains duplicate factor values")
+        canonical_colors[str(key)] = values
+    canonical_styles: dict[str, dict[str, list[str]]] = {}
+    for key, raw_pools in styles.items():
+        if not re.fullmatch(r"(?:S\d{2}|CUSTOM-S-[0-9A-F]{16})", str(key)):
+            raise ValueError(f"Invalid style range key {key!r}")
+        if not isinstance(raw_pools, dict) or set(raw_pools) != {
+            "silhouettes",
+            "substyles",
+        }:
+            raise ValueError(
+                f"Style range {key} must contain exactly silhouettes and substyles"
+            )
+        canonical_pools: dict[str, list[str]] = {}
+        for pool_name in ("silhouettes", "substyles"):
+            raw_values = raw_pools[pool_name]
+            if not isinstance(raw_values, list) or not raw_values:
+                raise ValueError(
+                    f"Style range {key} {pool_name} must contain a non-empty array"
+                )
+            values = [str(item).strip() for item in raw_values]
+            if any(
+                not item or ";" in item or "\n" in item or "\r" in item
+                for item in values
+            ):
+                raise ValueError(
+                    f"Style range {key} {pool_name} contains an invalid factor value"
+                )
+            if len({item.casefold() for item in values}) != len(values):
+                raise ValueError(
+                    f"Style range {key} {pool_name} contains duplicate factor values"
+                )
+            canonical_pools[pool_name] = values
+        canonical_styles[str(key)] = canonical_pools
+    payload: dict[str, object] = {
+        "colors": dict(sorted(canonical_colors.items())),
+        "styles": dict(sorted(canonical_styles.items())),
+    }
+    if value != compact_json(payload):
+        raise ValueError("wardrobe_range_pools_json is not canonical compact JSON")
+    return payload
+
+
+def validate_range_pools_against_profile(
+    profile: dict[str, str],
+    selected_color_keys: set[str] | None = None,
+    selected_style_keys: set[str] | None = None,
+) -> list[str]:
+    label = profile.get("character_id", "?")
+    value = profile.get("wardrobe_range_pools_json", "")
+    if not value:
+        return [f"{label}: wardrobe_range_pools_json is required for v2 wardrobe selection"]
+    try:
+        pools = parse_range_pools(value)
+    except ValueError as exc:
+        return [f"{label}: {exc}"]
+    colors = pools["colors"]
+    styles = pools["styles"]
+    errors: list[str] = []
+    for key, values in colors.items():
+        if len(values) < 4:
+            errors.append(
+                f"{label}: color range {key} requires at least four approved sub-palettes"
+            )
+    for key, style_pools in styles.items():
+        for pool_name in ("silhouettes", "substyles"):
+            if len(style_pools[pool_name]) < 4:
+                errors.append(
+                    f"{label}: style range {key} requires at least four approved {pool_name}"
+                )
+    if selected_color_keys is not None and set(colors) != selected_color_keys:
+        errors.append(
+            f"{label}: color range-pool keys do not exactly match selected color keys"
+        )
+    if selected_style_keys is not None and set(styles) != selected_style_keys:
+        errors.append(
+            f"{label}: style range-pool keys do not exactly match selected style keys"
+        )
+    flat_colors = {
+        item.casefold() for values in colors.values() for item in values
+    }
+    flat_silhouettes = {
+        item.casefold()
+        for pools_for_style in styles.values()
+        for item in pools_for_style["silhouettes"]
+    }
+    flat_substyles = {
+        item.casefold()
+        for pools_for_style in styles.values()
+        for item in pools_for_style["substyles"]
+    }
+    expected = {
+        "outfit_palette_options": flat_colors,
+        "outfit_silhouette_options": flat_silhouettes,
+        "outfit_style_options": flat_substyles,
+    }
+    for field, union in expected.items():
+        actual = {item.casefold() for item in split_values(profile.get(field, ""))}
+        if actual != union:
+            errors.append(
+                f"{label}: {field} must equal the exact union of wardrobe range pools"
+            )
+    return errors
 
 
 def duplicated(values: list[str]) -> list[str]:
@@ -229,7 +376,12 @@ def duplicated(values: list[str]) -> list[str]:
 
 
 def profile_sha256(row: dict[str, str]) -> str:
-    canonical = {field: row.get(field, "") for field in PROFILE_FIELDS}
+    fields = (
+        PROFILE_FIELDS_V2
+        if "wardrobe_range_pools_json" in row
+        else PROFILE_FIELDS_V1
+    )
+    canonical = {field: row.get(field, "") for field in fields}
     payload = json.dumps(
         canonical,
         ensure_ascii=False,
@@ -409,6 +561,8 @@ def validate_profile_row(row: dict[str, str], line: int) -> list[str]:
         errors.append(f"{label}: fixed wardrobe requires signature_outfit")
     elif policy == "none" and signature.casefold() != "not-applicable":
         errors.append(f"{label}: no-clothing profile must set signature_outfit to not-applicable")
+    if row.get("wardrobe_range_pools_json", ""):
+        errors.extend(validate_range_pools_against_profile(row))
     return errors
 
 
@@ -417,8 +571,11 @@ def load_profiles(path: Path) -> tuple[dict[str, dict[str, str]], list[str]]:
     profiles: dict[str, dict[str, str]] = {}
     with path.open(newline="", encoding="utf-8-sig") as handle:
         reader = csv.DictReader(handle)
-        if list(reader.fieldnames or []) != PROFILE_FIELDS:
-            raise ValueError(f"Character profile must contain exactly these fields: {PROFILE_FIELDS}")
+        fieldnames = list(reader.fieldnames or [])
+        if tuple(fieldnames) not in {tuple(PROFILE_FIELDS_V1), tuple(PROFILE_FIELDS_V2)}:
+            raise ValueError(
+                "Character profile must contain exactly the v1 or v2 field set"
+            )
         for line, raw in enumerate(reader, start=2):
             row = {key: (value or "") for key, value in raw.items()}
             for field, value in row.items():
@@ -460,6 +617,119 @@ def validate_photo_pool(
     return errors
 
 
+def validate_v2_assignment_plan(rows: list[dict[str, str]]) -> list[str]:
+    """Recompute every v2 range assignment in full manifest order."""
+    from wardrobe_choice import (
+        build_balanced_scattered_assignments,
+        parse_selection_payload,
+    )
+
+    errors: list[str] = []
+    groups: dict[tuple[str, str, str], list[dict[str, str]]] = {}
+    for row in rows:
+        if row.get("wardrobe_selection_schema_version") != "2":
+            continue
+        if row.get("wardrobe_policy") not in {"varied", "signature-variants"}:
+            continue
+        key = (
+            row.get("batch_id", ""),
+            row.get("character_id", ""),
+            row.get("wardrobe_recommendation_fingerprint", ""),
+        )
+        groups.setdefault(key, []).append(row)
+
+    for (batch_id, character_id, digest), group_rows in groups.items():
+        first = group_rows[0]
+        selected_json = first.get("wardrobe_selected_ranges_json", "")
+        seed = first.get("adaptation_seed", "") or digest
+        for row in group_rows[1:]:
+            for field in (
+                "wardrobe_selected_ranges_json",
+                "wardrobe_assignment_strategy",
+                "adaptation_seed",
+            ):
+                if row.get(field, "") != first.get(field, ""):
+                    errors.append(
+                        f"{row.get('number', '?')}: {field} must be stable for "
+                        "v2 range assignment"
+                    )
+        try:
+            payload = parse_selection_payload(selected_json)
+            expected = build_balanced_scattered_assignments(
+                payload,
+                len(group_rows),
+                seed,
+            )
+        except ValueError as exc:
+            errors.append(
+                f"{batch_id or '?'}/{character_id or '?'}: cannot rebuild "
+                f"v2 assignments: {exc}"
+            )
+            continue
+
+        for row, assignment in zip(group_rows, expected):
+            for field in WARDROBE_V2_ASSIGNMENT_FIELDS:
+                if row.get(field, "") != assignment[field]:
+                    errors.append(
+                        f"{row.get('number', '?')}: {field} does not match "
+                        "balanced-scattered-v1 recomputation"
+                    )
+
+        color_keys = [str(item["key"]) for item in payload["colors"]]
+        style_keys = [str(item["key"]) for item in payload["styles"]]
+        color_counts = [
+            sum(
+                row.get("assigned_color_direction_key") == key
+                for row in group_rows
+            )
+            for key in color_keys
+        ]
+        style_counts = [
+            sum(
+                row.get("assigned_style_family_key") == key
+                for row in group_rows
+            )
+            for key in style_keys
+        ]
+        for dimension, counts in (("color", color_counts), ("style", style_counts)):
+            if counts and max(counts) - min(counts) > 1:
+                errors.append(
+                    f"{character_id}: v2 {dimension} range usage is unbalanced {counts}"
+                )
+        pair_counts = {
+            (color_key, style_key): sum(
+                row.get("assigned_color_direction_key") == color_key
+                and row.get("assigned_style_family_key") == style_key
+                for row in group_rows
+            )
+            for color_key in color_keys
+            for style_key in style_keys
+        }
+        if pair_counts and max(pair_counts.values()) - min(pair_counts.values()) > 1:
+            errors.append(
+                f"{character_id}: v2 color/style pair usage is unbalanced "
+                f"{sorted(pair_counts.values())}"
+            )
+        if len(pair_counts) > 1:
+            for left, middle, right in zip(
+                group_rows, group_rows[1:], group_rows[2:]
+            ):
+                triples = [
+                    (
+                        item.get("assigned_color_direction_key"),
+                        item.get("assigned_style_family_key"),
+                    )
+                    for item in (left, middle, right)
+                ]
+                if len(set(triples)) == 1:
+                    errors.append(
+                        f"{left.get('number', '?')}/{middle.get('number', '?')}/"
+                        f"{right.get('number', '?')}: v2 range assignment repeats "
+                        "the same pair three times consecutively"
+                    )
+    return errors
+
+
 def validate_manifest_profiles(
     profiles: dict[str, dict[str, str]],
     manifest: Path,
@@ -473,12 +743,14 @@ def validate_manifest_profiles(
     from wardrobe_choice import (
         DEFAULT_LIBRARY as DEFAULT_WARDROBE_LIBRARY,
         load_library as load_wardrobe_library,
+        parse_selection_payload,
         resolve_age_domain,
         validate_model_curated_binding,
     )
 
     errors: list[str] = []
     fieldnames, all_rows = read_manifest(manifest)
+    errors.extend(validate_v2_assignment_plan(all_rows))
     rows = all_rows if selected_rows is None else selected_rows
     if wardrobe_library is None:
         wardrobe_library = load_wardrobe_library(DEFAULT_WARDROBE_LIBRARY)
@@ -500,6 +772,12 @@ def validate_manifest_profiles(
     missing = sorted(required_fields - set(fieldnames))
     if missing:
         return [f"Manifest is missing character-adaptation fields {missing}"]
+    present_v2 = set(WARDROBE_V2_BATCH_FIELDS) | set(WARDROBE_V2_ASSIGNMENT_FIELDS)
+    if present_v2.intersection(fieldnames) and not present_v2.issubset(fieldnames):
+        return [
+            "Manifest has a partial wardrobe v2 profile-binding schema; missing "
+            f"{sorted(present_v2 - set(fieldnames))}"
+        ]
 
     batch_values: dict[str, tuple[str, ...]] = {}
     for row in rows:
@@ -526,6 +804,28 @@ def validate_manifest_profiles(
 
         errors.extend(validate_wardrobe_provenance(row))
         errors.extend(validate_model_curated_binding(row, wardrobe_library, profile))
+        if row.get("wardrobe_selection_schema_version") == "2":
+            try:
+                selected_ranges = parse_selection_payload(
+                    row.get("wardrobe_selected_ranges_json", "")
+                )
+            except ValueError:
+                # The selection validator above reports the exact JSON error.
+                selected_ranges = None
+            if selected_ranges is not None:
+                errors.extend(
+                    validate_range_pools_against_profile(
+                        profile,
+                        {
+                            str(item["key"])
+                            for item in selected_ranges["colors"]
+                        },
+                        {
+                            str(item["key"])
+                            for item in selected_ranges["styles"]
+                        },
+                    )
+                )
         errors.extend(
             validate_adult_profile_wardrobe_lock(
                 profile,
@@ -568,6 +868,7 @@ def validate_manifest_profiles(
             row.get("adaptation_seed", ""),
             row.get("persona", ""),
             *(row.get(field, "") for field in WARDROBE_SELECTION_FIELDS),
+            *(row.get(field, "") for field in WARDROBE_V2_BATCH_FIELDS),
         )
         prior = batch_values.setdefault(character_id, values)
         if prior != values:
@@ -628,7 +929,19 @@ def build_diverse_sequence(
                 dimension_usage = [
                     usage[index][value.casefold()] for index, value in enumerate(item)
                 ]
+                prospective_spreads: list[int] = []
+                for index, value in enumerate(item):
+                    next_usage = usage[index].copy()
+                    next_usage[value.casefold()] += 1
+                    all_values = {
+                        candidate_item[index].casefold()
+                        for candidate_item in combinations
+                    }
+                    counts = [next_usage[key] for key in all_values]
+                    prospective_spreads.append(max(counts) - min(counts))
                 return (
+                    -max(prospective_spreads),
+                    -sum(prospective_spreads),
                     changed,
                     fresh_dimensions,
                     recent_distance,
@@ -650,7 +963,7 @@ def build_diverse_sequence(
 
 
 def choose_factor_sequence(
-    profile: dict[str, str], count: int
+    profile: dict[str, str], count: int, seed: str = ""
 ) -> list[tuple[str, str, str]]:
     policy = profile["wardrobe_policy"]
     if policy == "fixed":
@@ -663,17 +976,147 @@ def choose_factor_sequence(
     styles = split_values(profile["outfit_style_options"])
     combinations = list(itertools.product(palette, silhouettes, styles))
     if count > len(combinations):
-        cycle = build_diverse_sequence(
-            combinations,
-            len(combinations),
-            require_cycle_boundary=True,
-        )
-        return [cycle[index % len(cycle)] for index in range(count)]
+        selected: list[tuple[str, str, str]] = []
+        cycle_index = 0
+        base_offset = int(
+            hashlib.sha256(
+                (seed or profile.get("_profile_sha256", "")).encode("utf-8")
+            ).hexdigest(),
+            16,
+        ) % len(combinations)
+        while len(selected) < count:
+            # Advancing the offset guarantees that complete Cartesian cycles do
+            # not replay in the same order while remaining deterministic.
+            offset = (base_offset + cycle_index) % len(combinations)
+            rotated = combinations[offset:] + combinations[:offset]
+            cycle_count = min(len(combinations), count - len(selected))
+            cycle = build_diverse_sequence(
+                rotated,
+                cycle_count,
+                require_cycle_boundary=cycle_count == len(combinations),
+            )
+            if selected and len(cycle) > 1:
+                for shift in range(len(cycle)):
+                    candidate = cycle[shift:] + cycle[:shift]
+                    if difference_count(selected[-1], candidate[0]) >= 2 and (
+                        len(palette) < 2
+                        or selected[-1][0].casefold() != candidate[0][0].casefold()
+                    ):
+                        cycle = candidate
+                        break
+            selected.extend(cycle)
+            cycle_index += 1
+        return selected
     return build_diverse_sequence(
         combinations,
         count,
         require_cycle_boundary=False,
     )
+
+
+def deterministic_value_sequence(
+    values: list[str], count: int, seed: str, key: str, dimension: str
+) -> list[str]:
+    result: list[str] = []
+    cycle_index = 0
+    while len(result) < count:
+        ordered = sorted(
+            values,
+            key=lambda value: hashlib.sha256(
+                f"{seed}|{key}|{dimension}|{cycle_index}|{value.casefold()}".encode(
+                    "utf-8"
+                )
+            ).hexdigest(),
+        )
+        if result and len(ordered) > 1 and ordered[0].casefold() == result[-1].casefold():
+            ordered = ordered[1:] + ordered[:1]
+        result.extend(ordered)
+        cycle_index += 1
+    return result[:count]
+
+
+def choose_range_factor_sequence(
+    profile: dict[str, str],
+    selected_ranges_json: str,
+    count: int,
+    seed: str,
+) -> list[dict[str, str]]:
+    from wardrobe_choice import (
+        build_balanced_scattered_assignments,
+        parse_selection_payload,
+    )
+
+    selected_ranges = parse_selection_payload(selected_ranges_json)
+    errors = validate_range_pools_against_profile(
+        profile,
+        {str(item["key"]) for item in selected_ranges["colors"]},
+        {str(item["key"]) for item in selected_ranges["styles"]},
+    )
+    if errors:
+        raise ValueError("Invalid wardrobe range pools:\n- " + "\n- ".join(errors))
+    range_pools = parse_range_pools(profile["wardrobe_range_pools_json"])
+    effective_seed = seed or profile.get("_profile_sha256", "")
+    assignments = build_balanced_scattered_assignments(
+        selected_ranges,
+        count,
+        effective_seed,
+    )
+    color_totals = Counter(
+        str(item["assigned_color_direction_key"]) for item in assignments
+    )
+    style_totals = Counter(
+        str(item["assigned_style_family_key"]) for item in assignments
+    )
+    color_sequences = {
+        key: deterministic_value_sequence(
+            range_pools["colors"][key], total, effective_seed, key, "color"
+        )
+        for key, total in color_totals.items()
+    }
+    style_factor_sequences: dict[str, list[tuple[str, str]]] = {}
+    for key, total in style_totals.items():
+        style_pool = range_pools["styles"][key]
+        factor_payload = {
+            "colors": [
+                {"key": value} for value in style_pool["silhouettes"]
+            ],
+            "styles": [
+                {"key": value} for value in style_pool["substyles"]
+            ],
+        }
+        factor_assignments = build_balanced_scattered_assignments(
+            factor_payload,
+            total,
+            f"{effective_seed}|{key}|style-factors",
+        )
+        style_factor_sequences[key] = [
+            (
+                str(item["assigned_color_direction_key"]),
+                str(item["assigned_style_family_key"]),
+            )
+            for item in factor_assignments
+        ]
+    color_offsets: Counter[str] = Counter()
+    style_offsets: Counter[str] = Counter()
+    factors: list[dict[str, str]] = []
+    for assignment in assignments:
+        color_key = str(assignment["assigned_color_direction_key"])
+        style_key = str(assignment["assigned_style_family_key"])
+        color_offset = color_offsets[color_key]
+        style_offset = style_offsets[style_key]
+        silhouette, substyle = style_factor_sequences[style_key][style_offset]
+        factors.append(
+            {
+                "outfit_color": color_sequences[color_key][color_offset],
+                "outfit_silhouette": silhouette,
+                "outfit_style": substyle,
+                "assigned_color_direction_key": color_key,
+                "assigned_style_family_key": style_key,
+            }
+        )
+        color_offsets[color_key] += 1
+        style_offsets[style_key] += 1
+    return factors
 
 
 def suggest(
@@ -682,19 +1125,49 @@ def suggest(
     seed: str | None,
     count: int,
     persona_override: str | None = None,
+    selected_ranges_json: str | None = None,
+    assignment_seed: str | None = None,
 ) -> dict[str, object]:
     if count < 1:
         raise ValueError("--count must be at least 1")
     if mode not in ADAPTATION_MODES:
         raise ValueError(f"Unsupported adaptation mode {mode!r}")
     effective_seed = seed or ""
+    output_seed = effective_seed
     persona = persona_override or profile["recommended_persona"]
     if mode == "recommend" and persona != profile["recommended_persona"]:
         raise ValueError("recommend mode must use the profile's recommended_persona")
-    factors = choose_factor_sequence(profile, count)
+    if selected_ranges_json:
+        output_seed = (
+            assignment_seed
+            or effective_seed
+            or profile.get("_profile_sha256", "")
+        )
+        planned_factors = choose_range_factor_sequence(
+            profile,
+            selected_ranges_json,
+            count,
+            output_seed,
+        )
+    else:
+        planned_factors = [
+            {
+                "outfit_color": color,
+                "outfit_silhouette": silhouette,
+                "outfit_style": style,
+                "assigned_color_direction_key": "",
+                "assigned_style_family_key": "",
+            }
+            for color, silhouette, style in choose_factor_sequence(
+                profile, count, effective_seed
+            )
+        ]
     outfits: list[dict[str, object]] = []
     factor_occurrences: dict[tuple[str, str, str], int] = {}
-    for index, (color, silhouette, style) in enumerate(factors, start=1):
+    for index, factor in enumerate(planned_factors, start=1):
+        color = factor["outfit_color"]
+        silhouette = factor["outfit_silhouette"]
+        style = factor["outfit_style"]
         if profile["wardrobe_policy"] == "none":
             description = "not-applicable"
         elif profile["wardrobe_policy"] == "fixed":
@@ -722,6 +1195,12 @@ def suggest(
                 "outfit_color": color,
                 "outfit_silhouette": silhouette,
                 "outfit_style": style,
+                "assigned_color_direction_key": factor[
+                    "assigned_color_direction_key"
+                ],
+                "assigned_style_family_key": factor[
+                    "assigned_style_family_key"
+                ],
             }
         )
     return {
@@ -729,9 +1208,11 @@ def suggest(
         "profile_version": profile["profile_version"],
         "character_profile_sha256": profile["_profile_sha256"],
         "adaptation_mode": mode,
-        "adaptation_seed": effective_seed,
+        "adaptation_seed": output_seed,
         "persona": persona,
         "wardrobe_policy": profile["wardrobe_policy"],
+        "wardrobe_selection_schema_version": "2" if selected_ranges_json else "1",
+        "wardrobe_selected_ranges_json": selected_ranges_json or "",
         "outfits": outfits,
     }
 
@@ -772,7 +1253,15 @@ def main() -> int:
         raise ValueError(f"Unknown character_id {args.character_id!r}")
     print(
         json.dumps(
-            suggest(profile, args.mode, args.seed, args.count, args.persona),
+            suggest(
+                profile,
+                args.mode,
+                args.seed,
+                args.count,
+                args.persona,
+                args.selected_ranges_json,
+                args.assignment_seed,
+            ),
             ensure_ascii=True,
             indent=2,
         )

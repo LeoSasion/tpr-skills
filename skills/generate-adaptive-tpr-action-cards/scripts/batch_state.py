@@ -13,6 +13,8 @@ from batch_common import (
     EXECUTION_BACKGROUND_FIELDS,
     GENERATION_BACKEND_FIELDS,
     WARDROBE_SELECTION_FIELDS,
+    WARDROBE_V2_ASSIGNMENT_FIELDS,
+    WARDROBE_V2_BATCH_FIELDS,
     atomic_write_csv,
     read_manifest,
     require_delivery_choice,
@@ -61,7 +63,7 @@ FAILURE_CODES = {
 WARDROBE_UNSAFE_REASONS = {
     "minor-sexualization",
 }
-REQUIRED_FIELDS = {
+LEGACY_REQUIRED_FIELDS = {
     "character_id",
     "character_profile_version",
     "character_profile_sha256",
@@ -98,6 +100,14 @@ REQUIRED_FIELDS = {
     *EXECUTION_BACKGROUND_FIELDS,
     *GENERATION_BACKEND_FIELDS,
     *WARDROBE_SELECTION_FIELDS,
+}
+WARDROBE_V2_REQUIRED_FIELDS = {
+    *WARDROBE_V2_BATCH_FIELDS,
+    *WARDROBE_V2_ASSIGNMENT_FIELDS,
+}
+REQUIRED_FIELDS = {
+    *LEGACY_REQUIRED_FIELDS,
+    *WARDROBE_V2_REQUIRED_FIELDS,
 }
 
 
@@ -162,9 +172,29 @@ def selected(rows: list[dict[str, str]], args) -> list[dict[str, str]]:
 
 
 def require_schema(fieldnames: list[str]) -> None:
-    missing = sorted(REQUIRED_FIELDS - set(fieldnames))
+    malformed_headers = [name for name in fieldnames if name != name.strip()]
+    if malformed_headers:
+        raise ValueError(
+            "Manifest field names must not have leading or trailing whitespace: "
+            f"{malformed_headers}"
+        )
+    duplicate_headers = sorted(
+        {name for name in fieldnames if fieldnames.count(name) > 1}
+    )
+    if duplicate_headers:
+        raise ValueError(f"Manifest contains duplicate field names {duplicate_headers}")
+    present = set(fieldnames)
+    missing = sorted(LEGACY_REQUIRED_FIELDS - present)
     if missing:
         raise ValueError(f"Manifest is not the current workflow schema; missing {missing}")
+    present_v2 = WARDROBE_V2_REQUIRED_FIELDS & present
+    if present_v2:
+        missing_v2 = sorted(WARDROBE_V2_REQUIRED_FIELDS - present)
+        if missing_v2:
+            raise ValueError(
+                "Manifest has a partial wardrobe v2 workflow schema; missing "
+                f"{missing_v2}"
+            )
 
 
 def append_failure(row: dict[str, str], code: str, detail: str) -> None:

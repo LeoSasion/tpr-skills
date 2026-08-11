@@ -14,14 +14,16 @@ Use [wardrobe-option-library.csv](wardrobe-option-library.csv) as the single sou
 
 ## Two-round contract
 
-Run two sequential single-select rounds:
+Run two sequential range-choice rounds. These are the only routine questions that support a multi-select union:
 
-1. Recommend a broad color direction from the `color` rows.
-2. After the user selects one color direction, recommend a broad style family from the `style` rows while conditioning on that color choice.
+1. Recommend three broad color directions from the `color` rows and let the user retain one or more.
+2. After the user finalizes a non-empty color-key set, recommend three broad style families from the `style` rows while conditioning on the complete selected color set; let the user retain one or more.
 
 Do not combine color, silhouette, garment, and style into one option. Do not use a random number generator, shuffled list, hash order, or Cartesian product to decide which options the user sees. The model must inspect the approved originals and rank suitable library entries. The script validates and formats the model's choices; it does not make the aesthetic decision.
 
-Each screen contains exactly three model-curated options plus `更多其他`. Choosing `更多其他` refreshes only the current round with the next-best unshown IDs. A style refresh preserves the selected color direction.
+Each screen contains exactly three model-curated options plus `更多其他`. Options 1–3 add deduplicated range keys. Option 4 is only a loop-control value. A response such as `1+2+4` retains 1 and 2, excludes every shown ID, and refreshes the current round; 4 never enters the selected set or fingerprint. Retained keys accumulate and deduplicate across refresh rounds. A style refresh preserves the complete selected color set.
+
+A directly entered name first resolves against current visible labels. Where labels repeat in the library, constrain the match by the approved age domain and resolved clothing-presentation group; ask if ambiguity remains. Unknown adult names may use the exact custom path. A `+`-joined custom expression is a range union, not a garment recipe: split it into separate custom keys and assign one key per card. Never copy the joined expression into `outfit` or an image prompt. Child and age-uncertain text may select only an eligible child-safe library row and never becomes `CUSTOM`.
 
 ## Recommendation evidence
 
@@ -32,7 +34,7 @@ Use only non-sensitive visible evidence that is useful for design:
 - visible contrast, line quality, hair or surface mass, and feature scale;
 - apparent life-stage presentation only for the age gate: keep minors and age-uncertain subjects nonsexualized, while honoring an explicit adult sensual-fashion request for clearly adult-presenting subjects;
 - character anatomy, movement range, subject/background separation, and print readability;
-- the user's stated preferences and, in Round 2, the selected color direction.
+- the user's stated preferences and, in Round 2, every selected color direction.
 
 Do not infer ethnicity, nationality, health, disability, religion, sexual orientation, actual gender identity, occupation, income, personality, attractiveness, body value, or a rigid personal-color season. Never recommend a direction because it will “hide flaws”, “look slimmer”, “look younger”, or conform to a gender stereotype. When age, proportions, or appearance evidence is uncertain, lower its weight and favor broadly compatible core options. Do not use uncertainty as a reason to impose conservative styling on a clearly adult-presenting subject, but do pause for adult confirmation before sexualized styling when the age band itself is uncertain.
 
@@ -58,12 +60,12 @@ The active library contains 18 narrow-group memberships in each child group, 21 
 
 ## Round 2: style family
 
-After the user selects a color direction, rerank only the rows eligible for the resolved recommendation group using:
+After the user finalizes a non-empty color-key set, rerank only the rows eligible for the resolved recommendation group using:
 
 1. the same non-sensitive visible evidence;
-2. compatibility with the selected color row's `visual_direction` and `within_range_diversity`;
+2. compatibility with every selected color row's `visual_direction` and `within_range_diversity`;
 3. apparent life-stage and anatomy safety;
-4. TPR action clarity and robust separation under either supported background mode;
+4. TPR action clarity and robust subject separation without inventing a background requirement;
 5. durable popularity tier, preferring `core` when suitability is otherwise close.
 
 Choose three materially different style families, again using at least two `family_cn` values and avoiding `near_neighbors`. Show only each broad `label_cn` and a short reason. Do not turn an option into a garment recipe, shopping list, occupation, scene, cultural identity, or exact silhouette.
@@ -82,14 +84,14 @@ Do not infer East Asian identity from a face. “East Asian mainstream” descri
 
 ## Expansion after both choices
 
-The selected IDs define broad constraints, not one outfit. Expand them into an approved profile pool before planning images:
+The canonical selected color/style key sets define broad batch constraints, not one outfit. Store them in v2 `wardrobe_selected_ranges_json`, bind them into the final fingerprint, and expand them into profile-v2 `wardrobe_range_pools_json` before planning images:
 
-- at least four visibly separated in-range sub-palettes;
-- at least four action-safe silhouette structures;
-- at least four styling sub-directions inside the selected family;
+- at least four visibly separated sub-palettes for each selected color key;
+- at least four action-safe silhouette structures for each applicable selected style key;
+- at least four styling sub-directions inside each selected style key;
 - varied layering, material weight, texture, trim placement, and accessory restraint in the complete `outfit` text;
-- no exact full-outfit repeat; use every approved value in each major pool before reuse;
-- for four samples, use four distinct colors and at least three silhouettes and three substyles when the approved pools make that feasible;
-- for a long batch, balance usage across each approved pool before adding a second cycle.
+- no exact full-outfit repeat; use every approved assigned-pair pool before reuse where feasible;
+- for four samples, maximize distinct assigned pairs, colors, silhouettes, and substyles when the approved pools make that feasible;
+- for a long batch, use `balanced-scattered-v1` to balance the selected color × style pairs with a difference of at most one when feasible, deterministically scatter their order from stable batch inputs, and reproduce the same assignments from the same inputs.
 
-Maximum diversity never permits drift outside the selected color direction or style family. It also never overrides identity anchors, signature costume rules, the applicable minor/adult age gate, action readability, anatomy, backend restrictions, or an explicit user restriction.
+Every v2 row records exactly one `assigned_color_direction_key` and one `assigned_style_family_key`. Use only factors from those two key-specific pools; never blend multiple color ranges or multiple style ranges in one image. Maximum diversity never permits drift outside the row's assignments or the stable selected sets. It also never overrides identity anchors, signature costume rules, the applicable minor/adult age gate, action readability, anatomy, backend restrictions, or an explicit user restriction. Frozen v1 single-selection records remain verify-only and cannot drive new recommendations or assignments.

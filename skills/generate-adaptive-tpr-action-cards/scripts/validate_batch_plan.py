@@ -14,6 +14,8 @@ from batch_common import (
     EXECUTION_BACKGROUND_FIELDS,
     GENERATION_BACKEND_FIELDS,
     WARDROBE_SELECTION_FIELDS,
+    WARDROBE_V2_ASSIGNMENT_FIELDS,
+    WARDROBE_V2_BATCH_FIELDS,
     WORD_IDENTIFIER_VISIBILITIES,
     atomic_write_csv,
     read_manifest,
@@ -21,7 +23,12 @@ from batch_common import (
     validate_execution_background_rows,
     validate_generation_backend_rows,
 )
-from character_profile import load_profiles, split_values, validate_manifest_profiles
+from character_profile import (
+    load_profiles,
+    parse_range_pools,
+    split_values,
+    validate_manifest_profiles,
+)
 from validate_action_library import load_validated_library, load_validated_suitability
 from wardrobe_choice import (
     DEFAULT_LIBRARY as DEFAULT_WARDROBE_LIBRARY,
@@ -58,7 +65,11 @@ REQUIRED_PLAN_FIELDS = [
     "outfit_silhouette",
     "outfit_style",
     "word_identifier_visibility",
-    *EXECUTION_BACKGROUND_FIELDS,
+    *[
+        field
+        for field in EXECUTION_BACKGROUND_FIELDS
+        if field != "background_treatment"
+    ],
     *GENERATION_BACKEND_FIELDS,
     *[
         field
@@ -226,6 +237,10 @@ def validate_rows(
         for field in REQUIRED_PLAN_FIELDS:
             if not row.get(field, "").strip():
                 errors.append(f"{identifier}: {field} is empty")
+        if row.get("wardrobe_selection_schema_version") == "2":
+            for field in (*WARDROBE_V2_BATCH_FIELDS, *WARDROBE_V2_ASSIGNMENT_FIELDS):
+                if not row.get(field, "").strip():
+                    errors.append(f"{identifier}: {field} is empty for wardrobe v2")
         choice = row.get("delivery_format", "").strip().casefold()
         if choice not in DELIVERY_CHOICES:
             errors.append(
@@ -291,19 +306,47 @@ def validate_rows(
                     errors.append(
                         f"{identifier}: signature-variant outfit omits signature_outfit"
                     )
-                pools = {
-                    "outfit_color": split_values(profile.get("outfit_palette_options", "")),
-                    "outfit_silhouette": split_values(
-                        profile.get("outfit_silhouette_options", "")
-                    ),
-                    "outfit_style": split_values(profile.get("outfit_style_options", "")),
-                }
+                if row.get("wardrobe_selection_schema_version") == "2":
+                    try:
+                        range_pools = parse_range_pools(
+                            profile.get("wardrobe_range_pools_json", "")
+                        )
+                        color_key = row.get("assigned_color_direction_key", "")
+                        style_key = row.get("assigned_style_family_key", "")
+                        pools = {
+                            "outfit_color": range_pools["colors"].get(color_key, []),
+                            "outfit_silhouette": range_pools["styles"].get(
+                                style_key, {}
+                            ).get("silhouettes", []),
+                            "outfit_style": range_pools["styles"].get(
+                                style_key, {}
+                            ).get("substyles", []),
+                        }
+                    except ValueError:
+                        pools = {
+                            "outfit_color": [],
+                            "outfit_silhouette": [],
+                            "outfit_style": [],
+                        }
+                else:
+                    pools = {
+                        "outfit_color": split_values(
+                            profile.get("outfit_palette_options", "")
+                        ),
+                        "outfit_silhouette": split_values(
+                            profile.get("outfit_silhouette_options", "")
+                        ),
+                        "outfit_style": split_values(
+                            profile.get("outfit_style_options", "")
+                        ),
+                    }
                 for field, values in pools.items():
                     if normalized(row.get(field, "")) not in {
                         normalized(value) for value in values
                     }:
                         errors.append(
-                            f"{identifier}: {field} is outside the selected-range character-profile pool"
+                            f"{identifier}: {field} is outside the selected-range "
+                            "character-profile pool assigned to this row"
                         )
 
     character_ids = {row.get("character_id", "") for row in rows}

@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import itertools
 import json
 import re
+import unicodedata
 from pathlib import Path
 
 from character_profile import load_profiles
@@ -15,6 +17,13 @@ from character_profile import load_profiles
 
 LIBRARY_VERSION = "2026.08.1"
 LEGACY_LIBRARY_VERSION = "2026.08"
+SELECTION_SCHEMA_VERSION = "2"
+ASSIGNMENT_STRATEGY = "balanced-scattered-v1"
+WARDROBE_SELECTION_GUIDANCE = (
+    "请回复 1、2、3 或 4；也可使用 1+2、2+3+4 这样的组合，或直接输入一个范围名称。"
+    "组合表示扩大逐张随机范围，每张图在同一维度只使用其中一个范围，不进行同图混搭。"
+)
+CUSTOM_RANGE_UNION_RE = re.compile(r"[+/]")
 DEFAULT_LIBRARY = (
     Path(__file__).resolve().parents[1]
     / "references"
@@ -76,15 +85,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reason", action="append", default=[])
     parser.add_argument("--exclude-id", action="append", default=[])
     parser.add_argument("--basis", action="append", default=[])
-    parser.add_argument("--selected-color-id")
-    parser.add_argument("--selected-style-id")
+    parser.add_argument("--selected-color-id", action="append", default=[])
+    parser.add_argument("--selected-style-id", action="append", default=[])
     parser.add_argument(
         "--recommendation-method",
-        choices=["model-curated", "user-specified"],
+        choices=["model-curated", "user-specified", "mixed"],
         default="model-curated",
     )
-    parser.add_argument("--selected-color-label")
-    parser.add_argument("--selected-style-label")
+    parser.add_argument("--selected-color-label", action="append", default=[])
+    parser.add_argument("--selected-style-label", action="append", default=[])
+    parser.add_argument("--selected-color-round", action="append", type=int, default=[])
+    parser.add_argument("--selected-color-option", action="append", type=int, default=[])
+    parser.add_argument("--selected-style-round", action="append", type=int, default=[])
+    parser.add_argument("--selected-style-option", action="append", type=int, default=[])
+    parser.add_argument(
+        "--selection-schema-version",
+        choices=["auto", "1", SELECTION_SCHEMA_VERSION],
+        default="auto",
+    )
+    parser.add_argument("--selection-expression")
+    parser.add_argument("--retained-selection-json", default="[]")
+    parser.add_argument("--assignment-count", type=int)
+    parser.add_argument("--assignment-seed")
     parser.add_argument("--custom-override")
     return parser.parse_args()
 
@@ -290,6 +312,710 @@ def fingerprint(payload: dict[str, object]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def compact_json(payload: object) -> str:
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def normalize_custom_label(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value)
+    return " ".join(normalized.strip().split())
+
+
+def custom_selection_key(stage: str, label: str) -> str:
+    prefix = "C" if stage == "color" else "S"
+    normalized = normalize_custom_label(label).casefold()
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16].upper()
+    return f"CUSTOM-{prefix}-{digest}"
+
+
+def selection_item(
+    stage: str,
+    *,
+    option_id: str,
+    label: str,
+    round_number: int,
+    option_number: int,
+    source: str,
+) -> dict[str, object]:
+    normalized_label = normalize_custom_label(label)
+    if not normalized_label or any(character in normalized_label for character in "\r\n;"):
+        raise ValueError("Selection labels must be non-empty, single-line, and omit semicolons")
+    if source == "library":
+        key = option_id.strip().upper()
+        expected = r"C\d{2}" if stage == "color" else r"S\d{2}"
+        if not re.fullmatch(expected, key):
+            raise ValueError(f"Invalid {stage} library selection ID {option_id!r}")
+        if not (
+            (round_number >= 1 and option_number in {1, 2, 3})
+            or (round_number == 0 and option_number == 0)
+        ):
+            raise ValueError(
+                "Library selections require round >= 1 and option 1-3, or 0/0 "
+                "for an exact user-entered library name"
+            )
+        item_id = key
+    elif source == "user-custom":
+        if round_number != 0 or option_number != 0:
+            raise ValueError("Custom selections require round=0 and option=0")
+        if CUSTOM_RANGE_UNION_RE.search(normalized_label):
+            raise ValueError(
+                "A custom range label must describe exactly one range; split '+' "
+                "or '/' unions into separate custom selections"
+            )
+        key = custom_selection_key(stage, normalized_label)
+        item_id = ""
+    else:
+        raise ValueError(f"Unsupported selection source {source!r}")
+    return {
+        "key": key,
+        "source": source,
+        "id": item_id,
+        "label": normalized_label,
+        "round": round_number,
+        "option": option_number,
+    }
+
+
+def canonicalize_selection_items(
+    items: list[dict[str, object]], stage: str
+) -> list[dict[str, object]]:
+    canonical: list[dict[str, object]] = []
+    seen_keys: set[str] = set()
+    seen_positions: set[tuple[int, int]] = set()
+    for raw in items:
+        required = {"key", "source", "id", "label", "round", "option"}
+        if set(raw) != required:
+            raise ValueError(
+                f"{stage} selection items must contain exactly {sorted(required)}"
+            )
+        source = str(raw["source"])
+        option_id = str(raw["id"])
+        label = str(raw["label"])
+        try:
+            round_number = int(raw["round"])
+            option_number = int(raw["option"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Selection round and option must be integers") from exc
+        item = selection_item(
+            stage,
+            option_id=option_id,
+            label=label,
+            round_number=round_number,
+            option_number=option_number,
+            source=source,
+        )
+        if str(raw["key"]) != item["key"]:
+            raise ValueError(f"{stage} selection key does not match its source and label")
+        key = str(item["key"])
+        if key in seen_keys:
+            raise ValueError(f"Duplicate {stage} selection key {key!r}")
+        seen_keys.add(key)
+        position = (round_number, option_number)
+        if source == "library" and round_number > 0:
+            if position in seen_positions:
+                raise ValueError(
+                    f"Duplicate {stage} selection round/option {position!r}"
+                )
+            seen_positions.add(position)
+        canonical.append(item)
+    if not canonical:
+        raise ValueError(f"At least one {stage} range must be selected")
+    return sorted(canonical, key=lambda item: str(item["key"]))
+
+
+def canonical_selection_payload(
+    colors: list[dict[str, object]], styles: list[dict[str, object]]
+) -> dict[str, list[dict[str, object]]]:
+    return {
+        "colors": canonicalize_selection_items(colors, "color"),
+        "styles": canonicalize_selection_items(styles, "style"),
+    }
+
+
+def merge_selection_items(
+    retained: list[dict[str, object]],
+    added: list[dict[str, object]],
+    stage: str,
+) -> list[dict[str, object]]:
+    """Accumulate a stage selection while keeping first-seen provenance."""
+    merged: list[dict[str, object]] = []
+    by_key: dict[str, dict[str, object]] = {}
+    for raw in [*retained, *added]:
+        item = canonicalize_selection_items([raw], stage)[0]
+        key = str(item["key"])
+        prior = by_key.get(key)
+        if prior is not None:
+            stable_fields = ("source", "id", "label")
+            if any(
+                str(prior[field]).casefold() != str(item[field]).casefold()
+                for field in stable_fields
+            ):
+                raise ValueError(
+                    f"Conflicting duplicate {stage} selection key {key!r}"
+                )
+            continue
+        by_key[key] = item
+        merged.append(item)
+    return canonicalize_selection_items(merged, stage)
+
+
+def parse_selection_payload(value: str) -> dict[str, list[dict[str, object]]]:
+    try:
+        raw = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError("wardrobe_selected_ranges_json is not valid JSON") from exc
+    if not isinstance(raw, dict) or set(raw) != {"colors", "styles"}:
+        raise ValueError(
+            "wardrobe_selected_ranges_json must contain exactly colors and styles"
+        )
+    if not isinstance(raw["colors"], list) or not isinstance(raw["styles"], list):
+        raise ValueError("wardrobe selected colors/styles must be JSON arrays")
+    payload = canonical_selection_payload(raw["colors"], raw["styles"])
+    if value != compact_json(payload):
+        raise ValueError("wardrobe_selected_ranges_json is not canonical compact JSON")
+    return payload
+
+
+def selection_method(payload: dict[str, list[dict[str, object]]]) -> str:
+    origins = {
+        "curated"
+        if item["source"] == "library" and int(item["round"]) >= 1
+        else "specified"
+        for stage in ("colors", "styles")
+        for item in payload[stage]
+    }
+    if origins == {"curated"}:
+        return "model-curated"
+    if origins == {"specified"}:
+        return "user-specified"
+    return "mixed"
+
+
+def selection_custom_override(
+    payload: dict[str, list[dict[str, object]]]
+) -> str:
+    labels = [
+        str(item["label"])
+        for stage in ("colors", "styles")
+        for item in payload[stage]
+        if item["source"] == "user-custom"
+    ]
+    return ";".join(labels)
+
+
+def v2_selection_core(
+    row: dict[str, str],
+    profile: dict[str, str],
+    payload: dict[str, list[dict[str, object]]],
+) -> dict[str, object]:
+    basis = sorted(
+        {
+            item.strip()
+            for item in row.get("wardrobe_evidence_basis", "").split(";")
+            if item.strip()
+        }
+    )
+    return {
+        "selection_schema_version": SELECTION_SCHEMA_VERSION,
+        "library_version": row.get("wardrobe_library_version", ""),
+        "recommendation_method": selection_method(payload),
+        "character_id": row.get("character_id", ""),
+        "profile_version": row.get("character_profile_version", ""),
+        "character_profile_sha256": row.get("character_profile_sha256", ""),
+        "selected_ranges": payload,
+        "evidence_basis": basis,
+        "resolved_style_group": resolve_style_group(profile),
+        "resolved_age_domain": resolve_age_domain(profile),
+    }
+
+
+def validate_v2_selection_binding(
+    row: dict[str, str],
+    library: dict[str, dict[str, str]],
+    profile: dict[str, str] | None,
+) -> list[str]:
+    identifier = row.get("number", "?")
+    errors: list[str] = []
+    try:
+        payload = parse_selection_payload(row.get("wardrobe_selected_ranges_json", ""))
+    except ValueError as exc:
+        return [f"{identifier}: {exc}"]
+
+    expected_method = selection_method(payload)
+    if row.get("wardrobe_recommendation_method") != expected_method:
+        errors.append(
+            f"{identifier}: wardrobe_recommendation_method must be derived as {expected_method}"
+        )
+    if row.get("wardrobe_assignment_strategy") != ASSIGNMENT_STRATEGY:
+        errors.append(
+            f"{identifier}: wardrobe_assignment_strategy must be {ASSIGNMENT_STRATEGY}"
+        )
+    if row.get("wardrobe_library_version") != LIBRARY_VERSION:
+        errors.append(
+            f"{identifier}: v2 wardrobe selection requires library {LIBRARY_VERSION}"
+        )
+
+    resolved_group = resolve_style_group(profile) if profile is not None else None
+    age_domain = resolve_age_domain(profile) if profile is not None else None
+    for stage_name, library_stage in (("colors", "color"), ("styles", "style")):
+        for item in payload[stage_name]:
+            if item["source"] == "user-custom":
+                if profile is not None and age_domain != "adult":
+                    errors.append(
+                        f"{identifier}: custom wardrobe ranges require a clearly adult profile"
+                    )
+                continue
+            option_id = str(item["id"])
+            option = library.get(option_id)
+            if option is None or option.get("stage") != library_stage:
+                errors.append(
+                    f"{identifier}: selected {library_stage} ID {option_id!r} is absent from wardrobe library"
+                )
+                continue
+            if option.get("label_cn") != item["label"]:
+                errors.append(
+                    f"{identifier}: selected {library_stage} label does not match {option_id}"
+                )
+            if (
+                library_stage == "style"
+                and resolved_group is not None
+                and not style_row_is_eligible(option, resolved_group)
+                and not (
+                    age_domain == "adult"
+                    and expected_method in {"user-specified", "mixed"}
+                    and "adult" in style_row_age_domains(option)
+                )
+            ):
+                errors.append(
+                    f"{identifier}: selected style {option_id} is outside resolved style group {resolved_group}"
+                )
+
+    custom_override = selection_custom_override(payload)
+    if row.get("wardrobe_custom_override", "") != custom_override:
+        errors.append(
+            f"{identifier}: wardrobe_custom_override does not match custom selected ranges"
+        )
+
+    scalar_specs = (
+        (
+            payload["colors"],
+            "color_direction_id",
+            "color_direction_label",
+            "color_choice_round",
+            "color_choice_option",
+        ),
+        (
+            payload["styles"],
+            "style_family_id",
+            "style_family_label",
+            "style_choice_round",
+            "style_choice_option",
+        ),
+    )
+    for items, id_field, label_field, round_field, option_field in scalar_specs:
+        if len(items) == 1:
+            item = items[0]
+            expected_id = (
+                str(item["id"]) if item["source"] == "library" else "CUSTOM"
+            )
+            expected_values = {
+                id_field: expected_id,
+                label_field: str(item["label"]),
+                round_field: str(item["round"]),
+                option_field: str(item["option"]),
+            }
+        else:
+            expected_values = {
+                id_field: "not-applicable",
+                label_field: "not-applicable",
+                round_field: "0",
+                option_field: "0",
+            }
+        for field, expected in expected_values.items():
+            if row.get(field, "") != expected:
+                errors.append(
+                    f"{identifier}: v2 compatibility field {field} must be {expected!r}"
+                )
+
+    color_keys = {str(item["key"]) for item in payload["colors"]}
+    style_keys = {str(item["key"]) for item in payload["styles"]}
+    assigned_color = row.get("assigned_color_direction_key", "")
+    assigned_style = row.get("assigned_style_family_key", "")
+    for field, value, allowed in (
+        ("assigned_color_direction_key", assigned_color, color_keys),
+        ("assigned_style_family_key", assigned_style, style_keys),
+    ):
+        if any(delimiter in value for delimiter in (";", "+", "/", ",")):
+            errors.append(f"{identifier}: {field} must contain one scalar range key")
+        elif value not in allowed:
+            errors.append(f"{identifier}: {field} is outside the selected range set")
+
+    if profile is not None:
+        core = v2_selection_core(row, profile, payload)
+        if row.get("wardrobe_recommendation_fingerprint") != fingerprint(core):
+            errors.append(
+                f"{identifier}: v2 wardrobe recommendation fingerprint does not match selection"
+            )
+    return errors
+
+
+def build_balanced_scattered_assignments(
+    payload: dict[str, list[dict[str, object]]],
+    count: int,
+    seed: str,
+) -> list[dict[str, object]]:
+    if count < 1:
+        raise ValueError("Assignment count must be at least 1")
+    if not seed.strip():
+        raise ValueError("Multi-range assignment requires a non-empty stable seed")
+    colors = [str(item["key"]) for item in payload["colors"]]
+    styles = [str(item["key"]) for item in payload["styles"]]
+    pairs = list(itertools.product(colors, styles))
+    result: list[tuple[str, str]] = []
+    cycle_index = 0
+    while len(result) < count:
+        remaining = list(pairs)
+        color_counts = {key: 0 for key in colors}
+        style_counts = {key: 0 for key in styles}
+        cycle: list[tuple[str, str]] = []
+        while remaining and len(result) + len(cycle) < count:
+            def candidate_score(pair: tuple[str, str]) -> tuple[object, ...]:
+                next_color_counts = dict(color_counts)
+                next_style_counts = dict(style_counts)
+                next_color_counts[pair[0]] += 1
+                next_style_counts[pair[1]] += 1
+                color_spread = max(next_color_counts.values()) - min(
+                    next_color_counts.values()
+                )
+                style_spread = max(next_style_counts.values()) - min(
+                    next_style_counts.values()
+                )
+                tie = hashlib.sha256(
+                    f"{seed}|{cycle_index}|{pair[0]}|{pair[1]}".encode("utf-8")
+                ).hexdigest()
+                return (
+                    color_spread + style_spread,
+                    max(next_color_counts.values()) + max(next_style_counts.values()),
+                    tie,
+                )
+
+            chosen = min(remaining, key=candidate_score)
+            remaining.remove(chosen)
+            cycle.append(chosen)
+            color_counts[chosen[0]] += 1
+            style_counts[chosen[1]] += 1
+        result.extend(cycle)
+        cycle_index += 1
+    return [
+        {
+            "index": index,
+            "assigned_color_direction_key": pair[0],
+            "assigned_style_family_key": pair[1],
+        }
+        for index, pair in enumerate(result, start=1)
+    ]
+
+
+def parse_retained_items(value: str, stage: str) -> list[dict[str, object]]:
+    try:
+        raw = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError("--retained-selection-json is not valid JSON") from exc
+    if not isinstance(raw, list):
+        raise ValueError("--retained-selection-json must be a JSON array")
+    if not raw:
+        return []
+    return canonicalize_selection_items(raw, stage)
+
+
+def resolve_selection_expression(
+    expression: str,
+    rows: list[dict[str, str]],
+    stage: str,
+    round_number: int,
+    profile: dict[str, str],
+    library: dict[str, dict[str, str]],
+    retained_items: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    if "\n" in expression or "\r" in expression:
+        raise ValueError("Selection expression must be a single line")
+    raw = expression.strip()
+    if not raw:
+        raise ValueError("Selection expression is empty")
+    tokens = [token.strip() for token in raw.split("+")]
+    if any(not token for token in tokens) or len(tokens) != len(set(tokens)):
+        raise ValueError("Selection expression contains an empty or duplicate token")
+    if any(token.isdigit() and token not in {"1", "2", "3", "4"} for token in tokens):
+        raise ValueError("Numeric selection options must be 1, 2, 3, or 4")
+    numeric = all(re.fullmatch(r"[1-4]", token) for token in tokens)
+    labels = {normalize_custom_label(row["label_cn"]).casefold(): index for index, row in enumerate(rows, start=1)}
+    label_mode = all(
+        normalize_custom_label(token).casefold() in labels
+        or normalize_custom_label(token) == "更多其他"
+        for token in tokens
+    )
+    if not numeric and not label_mode:
+        if any(re.fullmatch(r"[1-4]", token) for token in tokens):
+            raise ValueError(
+                "Do not mix numeric choices with custom range names"
+            )
+        added: list[dict[str, object]] = []
+        for token in tokens:
+            custom_label = normalize_custom_label(token)
+            matches = [
+                row
+                for row in library.values()
+                if row.get("stage") == stage
+                and normalize_custom_label(row.get("label_cn", "")).casefold()
+                == custom_label.casefold()
+                and (
+                    stage == "color"
+                    or style_row_is_eligible(row, resolve_style_group(profile))
+                )
+            ]
+            if len(matches) > 1:
+                raise ValueError("Range name is ambiguous in the eligible library scope")
+            if len(matches) == 1:
+                matched = matches[0]
+                added.append(
+                    selection_item(
+                        stage,
+                        option_id=matched["id"],
+                        label=matched["label_cn"],
+                        round_number=0,
+                        option_number=0,
+                        source="library",
+                    )
+                )
+                continue
+            if resolve_age_domain(profile) != "adult":
+                raise ValueError(
+                    "Unknown custom wardrobe names require a clearly adult profile; "
+                    "choose an eligible minor-safe library direction"
+                )
+            added.append(
+                selection_item(
+                    stage,
+                    option_id="",
+                    label=custom_label,
+                    round_number=0,
+                    option_number=0,
+                    source="user-custom",
+                )
+            )
+        selected = merge_selection_items(
+            list(retained_items or []), added, stage
+        )
+        return {
+            "selected": selected,
+            "refresh_requested": False,
+            "finalizable": True,
+        }
+    indices: list[int] = []
+    refresh = False
+    for token in tokens:
+        index = int(token) if numeric else (
+            4
+            if normalize_custom_label(token) == "更多其他"
+            else labels[normalize_custom_label(token).casefold()]
+        )
+        if index == 4:
+            refresh = True
+        else:
+            indices.append(index)
+    added: list[dict[str, object]] = []
+    for index in indices:
+        row = rows[index - 1]
+        added.append(
+            selection_item(
+                stage,
+                option_id=row["id"],
+                label=row["label_cn"],
+                round_number=round_number,
+                option_number=index,
+                source="library",
+            )
+        )
+    if not retained_items and not added and not refresh:
+        raise ValueError("Select at least one range")
+    canonical = (
+        merge_selection_items(list(retained_items or []), added, stage)
+        if retained_items or added
+        else []
+    )
+    return {
+        "selected": canonical,
+        "refresh_requested": refresh,
+        "finalizable": bool(canonical) and not refresh,
+    }
+
+
+def cli_selection_items(
+    stage: str,
+    ids: list[str],
+    labels: list[str],
+    rounds: list[int],
+    options: list[int],
+    library: dict[str, dict[str, str]],
+    profile: dict[str, str],
+    *,
+    user_specified: bool = False,
+) -> list[dict[str, object]]:
+    normalized_ids = [value.strip().upper() for value in ids if value.strip()]
+    if not normalized_ids:
+        raise ValueError(f"At least one --selected-{stage}-id is required")
+    if labels and len(labels) != len(normalized_ids):
+        raise ValueError(f"Selected {stage} labels must align one-to-one with IDs")
+    if bool(rounds) != bool(options):
+        raise ValueError(f"Selected {stage} rounds and options must be supplied together")
+    if rounds and (len(rounds) != len(normalized_ids) or len(options) != len(normalized_ids)):
+        raise ValueError(f"Selected {stage} provenance must align one-to-one with IDs")
+    if not rounds:
+        if user_specified:
+            rounds = [0] * len(normalized_ids)
+            options = [0] * len(normalized_ids)
+        elif len(normalized_ids) > 1:
+            raise ValueError(
+                f"Multi-range {stage} finalization requires one round and option per ID"
+            )
+        else:
+            rounds = [1]
+            options = [1]
+
+    items: list[dict[str, object]] = []
+    for index, option_id in enumerate(normalized_ids):
+        provided_label = normalize_custom_label(labels[index]) if labels else ""
+        if option_id == "CUSTOM":
+            if not provided_label:
+                raise ValueError(f"CUSTOM {stage} requires a matching selected label")
+            item = selection_item(
+                stage,
+                option_id="",
+                label=provided_label,
+                round_number=0,
+                option_number=0,
+                source="user-custom",
+            )
+        else:
+            row = library.get(option_id)
+            if row is None or row.get("stage") != stage:
+                raise ValueError(f"{option_id!r} is not a valid selected {stage} ID")
+            if provided_label and provided_label != row["label_cn"]:
+                raise ValueError(f"Selected {stage} label does not match {option_id}")
+            if (
+                stage == "style"
+                and not style_row_is_eligible(row, resolve_style_group(profile))
+                and not (
+                    user_specified
+                    and resolve_age_domain(profile) == "adult"
+                    and "adult" in style_row_age_domains(row)
+                )
+            ):
+                raise ValueError(
+                    f"Selected style {option_id} is outside resolved style group "
+                    f"{resolve_style_group(profile)}"
+                )
+            item = selection_item(
+                stage,
+                option_id=option_id,
+                label=row["label_cn"],
+                round_number=rounds[index],
+                option_number=options[index],
+                source="library",
+            )
+        items.append(item)
+    canonical = canonicalize_selection_items(items, stage)
+    if any(item["source"] == "user-custom" for item in canonical):
+        if resolve_age_domain(profile) != "adult":
+            raise ValueError(
+                "Custom wardrobe ranges require a clearly adult profile"
+            )
+    return canonical
+
+
+def finalize_v1(
+    args: argparse.Namespace,
+    profile: dict[str, str],
+    library: dict[str, dict[str, str]],
+) -> dict[str, object]:
+    if len(args.selected_color_id) != 1 or len(args.selected_style_id) != 1:
+        raise ValueError("Selection schema v1 supports exactly one color and one style")
+    color_id = args.selected_color_id[0].strip().upper()
+    style_id = args.selected_style_id[0].strip().upper()
+    selected_color = library.get(color_id)
+    selected_style = library.get(style_id)
+    if args.recommendation_method == "user-specified":
+        basis = validate_basis("color", args.basis)
+        custom_override = (args.custom_override or "").strip()
+        if not custom_override:
+            raise ValueError("User-specified v1 finalization requires --custom-override")
+        if resolve_age_domain(profile) != "adult":
+            raise ValueError(
+                "User-specified wardrobe is not permitted for a child or age-uncertain profile"
+            )
+        color_label = (
+            normalize_custom_label(args.selected_color_label[0])
+            if color_id == "CUSTOM" and args.selected_color_label
+            else selected_color["label_cn"] if selected_color else ""
+        )
+        style_label = (
+            normalize_custom_label(args.selected_style_label[0])
+            if style_id == "CUSTOM" and args.selected_style_label
+            else selected_style["label_cn"] if selected_style else ""
+        )
+        if not color_label or not style_label:
+            raise ValueError("Invalid v1 user-specified color or style")
+        row_core = {
+            "wardrobe_library_version": LIBRARY_VERSION,
+            "character_id": profile["character_id"],
+            "character_profile_version": profile["profile_version"],
+            "character_profile_sha256": profile["_profile_sha256"],
+            "color_direction_id": color_id,
+            "color_direction_label": color_label,
+            "style_family_id": style_id,
+            "style_family_label": style_label,
+            "wardrobe_custom_override": custom_override,
+            "wardrobe_evidence_basis": ";".join(basis),
+        }
+        selection_core = user_specified_selection_core(row_core, profile)
+        return {
+            "choice_type": "wardrobe_selection",
+            **selection_core,
+            "recommendation_fingerprint": fingerprint(selection_core),
+        }
+    if selected_color is None or selected_color.get("stage") != "color":
+        raise ValueError("--selected-color-id must identify one color option")
+    if selected_style is None or selected_style.get("stage") != "style":
+        raise ValueError("--selected-style-id must identify one style option")
+    if not style_row_is_eligible(selected_style, resolve_style_group(profile)):
+        raise ValueError(
+            "--selected-style-id is outside resolved style group "
+            f"{resolve_style_group(profile)}"
+        )
+    selection_core = {
+        "library_version": LIBRARY_VERSION,
+        "recommendation_method": "model-curated",
+        "character_id": profile["character_id"],
+        "profile_version": profile["profile_version"],
+        "character_profile_sha256": profile["_profile_sha256"],
+        "color_direction_id": selected_color["id"],
+        "color_direction_label": selected_color["label_cn"],
+        "style_family_id": selected_style["id"],
+        "style_family_label": selected_style["label_cn"],
+        "resolved_style_group": resolve_style_group(profile),
+    }
+    return {
+        "choice_type": "wardrobe_selection",
+        **selection_core,
+        "recommendation_fingerprint": fingerprint(selection_core),
+    }
+
+
 def user_specified_selection_core(
     row: dict[str, str], profile: dict[str, str]
 ) -> dict[str, object]:
@@ -399,6 +1125,8 @@ def validate_model_curated_binding(
     profile: dict[str, str] | None = None,
 ) -> list[str]:
     """Bind a model-curated manifest record to this exact library and profile."""
+    if row.get("wardrobe_selection_schema_version", "") == SELECTION_SCHEMA_VERSION:
+        return validate_v2_selection_binding(row, library, profile)
     method = row.get("wardrobe_recommendation_method")
     if method == "user-specified":
         return validate_user_specified_binding(row, library, profile)
@@ -561,8 +1289,10 @@ def validate_candidates(
                 f"from exact group {resolved_style_group}"
             )
 
-    if stage == "style" and len({row["label_cn"].casefold() for row in rows}) != 3:
-        raise ValueError("The three style recommendations must use distinct visible labels")
+    if len({row["label_cn"].casefold() for row in rows}) != 3:
+        raise ValueError(
+            f"The three {stage} recommendations must use distinct visible labels"
+        )
 
     if len({row["family_cn"] for row in rows}) < 2:
         raise ValueError("The three recommendations must span at least two library families")
@@ -612,123 +1342,119 @@ def main() -> int:
     resolved_style_group = resolve_style_group(profile)
     eligible_groups = eligible_style_groups(resolved_style_group)
     library = load_library(args.library)
-    selected_color = library.get((args.selected_color_id or "").upper())
-    selected_style = library.get((args.selected_style_id or "").upper())
 
     if args.stage == "finalize":
-        if args.recommendation_method == "user-specified":
-            basis = validate_basis("color", args.basis)
-            custom_override = (args.custom_override or "").strip()
-            if not custom_override:
-                raise ValueError("User-specified finalization requires --custom-override")
-            age_domain = resolve_age_domain(profile)
-            if age_domain in {"child", "uncertain"}:
-                raise ValueError(
-                    "User-specified wardrobe is not permitted for a child or "
-                    "age-uncertain profile; use a model-curated minor-safe library "
-                    "style or obtain clear adult confirmation"
-                )
-
-            color_id = (args.selected_color_id or "").upper()
-            if color_id == "CUSTOM":
-                color_label = (args.selected_color_label or "").strip()
-                if not color_label:
-                    raise ValueError("CUSTOM color requires --selected-color-label")
-            elif selected_color and selected_color["stage"] == "color":
-                color_label = selected_color["label_cn"]
-                if args.selected_color_label and args.selected_color_label != color_label:
-                    raise ValueError("--selected-color-label does not match the library")
-            else:
-                raise ValueError(
-                    "--selected-color-id must identify one color option or CUSTOM"
-                )
-
-            style_id = (args.selected_style_id or "").upper()
-            if style_id == "CUSTOM":
-                style_label = (args.selected_style_label or "").strip()
-                if not style_label:
-                    raise ValueError("CUSTOM style requires --selected-style-label")
-            elif selected_style and selected_style["stage"] == "style":
-                style_label = selected_style["label_cn"]
-                if args.selected_style_label and args.selected_style_label != style_label:
-                    raise ValueError("--selected-style-label does not match the library")
-                if age_domain not in style_row_age_domains(selected_style):
-                    raise ValueError(
-                        "--selected-style-id crosses the "
-                        f"{age_domain} age domain"
-                    )
-            else:
-                raise ValueError(
-                    "--selected-style-id must identify one style option or CUSTOM"
-                )
-
-            row_core = {
-                "wardrobe_library_version": LIBRARY_VERSION,
-                "character_id": profile["character_id"],
-                "character_profile_version": profile["profile_version"],
-                "character_profile_sha256": profile["_profile_sha256"],
-                "color_direction_id": color_id,
-                "color_direction_label": color_label,
-                "style_family_id": style_id,
-                "style_family_label": style_label,
-                "wardrobe_custom_override": custom_override,
-                "wardrobe_evidence_basis": ";".join(basis),
+        use_v1 = args.selection_schema_version == "1" or (
+            args.selection_schema_version == "auto"
+            and len(args.selected_color_id) == 1
+            and len(args.selected_style_id) == 1
+            and args.assignment_count is None
+            and not args.selected_color_round
+            and not args.selected_color_option
+            and not args.selected_style_round
+            and not args.selected_style_option
+        )
+        if use_v1:
+            payload = finalize_v1(args, profile, library)
+            payload["expansion_contract"] = {
+                "minimum_sub_palettes": 4,
+                "minimum_silhouettes": 4,
+                "minimum_substyles": 4,
+                "reuse_rule": "cover-each-approved-pool-before-reuse",
+                "boundary": "maximize diversity without leaving the selected single ranges",
             }
-            selection_core = user_specified_selection_core(row_core, profile)
-            print(
-                json.dumps(
-                    {
-                        "choice_type": "wardrobe_selection",
-                        **selection_core,
-                        "recommendation_fingerprint": fingerprint(selection_core),
-                        "expansion_contract": {
-                            "minimum_sub_palettes": 4,
-                            "minimum_silhouettes": 4,
-                            "minimum_substyles": 4,
-                            "reuse_rule": "cover-each-approved-pool-before-reuse",
-                            "boundary": "maximize diversity without leaving the explicit user-specified direction",
-                        },
-                    },
-                    ensure_ascii=True,
-                    indent=2,
-                )
-            )
+            print(json.dumps(payload, ensure_ascii=True, indent=2))
             return 0
 
-        if not selected_color or selected_color["stage"] != "color":
-            raise ValueError("--selected-color-id must identify one color option")
-        if not selected_style or selected_style["stage"] != "style":
-            raise ValueError("--selected-style-id must identify one style option")
-        if not style_row_is_eligible(selected_style, resolved_style_group):
+        basis = validate_basis("color", args.basis or ["visible-appearance"])
+        colors = cli_selection_items(
+            "color",
+            args.selected_color_id,
+            args.selected_color_label,
+            args.selected_color_round,
+            args.selected_color_option,
+            library,
+            profile,
+            user_specified=args.recommendation_method in {"user-specified", "mixed"},
+        )
+        styles = cli_selection_items(
+            "style",
+            args.selected_style_id,
+            args.selected_style_label,
+            args.selected_style_round,
+            args.selected_style_option,
+            library,
+            profile,
+            user_specified=args.recommendation_method in {"user-specified", "mixed"},
+        )
+        selected_ranges = canonical_selection_payload(colors, styles)
+        selected_ranges_json = compact_json(selected_ranges)
+        method = selection_method(selected_ranges)
+        custom_override = selection_custom_override(selected_ranges)
+        if args.custom_override is not None and args.custom_override.strip() != custom_override:
             raise ValueError(
-                "--selected-style-id is outside resolved style group "
-                f"{resolved_style_group}"
+                "--custom-override must exactly match the custom range labels in canonical order"
             )
-        selection_core = {
-            "library_version": LIBRARY_VERSION,
-            "recommendation_method": "model-curated",
+        one_color = colors[0] if len(colors) == 1 else None
+        one_style = styles[0] if len(styles) == 1 else None
+        row_core = {
+            "wardrobe_selection_schema_version": SELECTION_SCHEMA_VERSION,
+            "wardrobe_library_version": LIBRARY_VERSION,
+            "wardrobe_recommendation_method": method,
             "character_id": profile["character_id"],
-            "profile_version": profile["profile_version"],
+            "character_profile_version": profile["profile_version"],
             "character_profile_sha256": profile["_profile_sha256"],
-            "color_direction_id": selected_color["id"],
-            "color_direction_label": selected_color["label_cn"],
-            "style_family_id": selected_style["id"],
-            "style_family_label": selected_style["label_cn"],
-            "resolved_style_group": resolved_style_group,
+            "wardrobe_evidence_basis": ";".join(basis),
+            "wardrobe_selected_ranges_json": selected_ranges_json,
+            "wardrobe_assignment_strategy": ASSIGNMENT_STRATEGY,
+            "color_direction_id": (
+                str(one_color["id"])
+                if one_color and one_color["source"] == "library"
+                else "CUSTOM" if one_color else "not-applicable"
+            ),
+            "color_direction_label": str(one_color["label"]) if one_color else "not-applicable",
+            "color_choice_round": str(one_color["round"]) if one_color else "0",
+            "color_choice_option": str(one_color["option"]) if one_color else "0",
+            "style_family_id": (
+                str(one_style["id"])
+                if one_style and one_style["source"] == "library"
+                else "CUSTOM" if one_style else "not-applicable"
+            ),
+            "style_family_label": str(one_style["label"]) if one_style else "not-applicable",
+            "style_choice_round": str(one_style["round"]) if one_style else "0",
+            "style_choice_option": str(one_style["option"]) if one_style else "0",
+            "wardrobe_custom_override": custom_override,
         }
+        core = v2_selection_core(row_core, profile, selected_ranges)
+        recommendation_fingerprint = fingerprint(core)
+        assignments: list[dict[str, object]] = []
+        effective_assignment_seed = (
+            args.assignment_seed or recommendation_fingerprint
+        )
+        if args.assignment_count is not None:
+            assignments = build_balanced_scattered_assignments(
+                selected_ranges,
+                args.assignment_count,
+                effective_assignment_seed,
+            )
         print(
             json.dumps(
                 {
                     "choice_type": "wardrobe_selection",
-                    **selection_core,
+                    **row_core,
+                    "selected_ranges": selected_ranges,
+                    "resolved_style_group": resolved_style_group,
                     "eligible_style_groups": eligible_groups,
-                    "recommendation_fingerprint": fingerprint(selection_core),
+                    "recommendation_fingerprint": recommendation_fingerprint,
+                    "adaptation_seed": effective_assignment_seed,
+                    "assignments": assignments,
                     "expansion_contract": {
                         "minimum_sub_palettes": 4,
                         "minimum_silhouettes": 4,
                         "minimum_substyles": 4,
                         "reuse_rule": "cover-each-approved-pool-before-reuse",
-                        "boundary": "maximize diversity without leaving selected color direction or style family",
+                        "assignment_rule": ASSIGNMENT_STRATEGY,
+                        "boundary": "each row uses exactly one selected color range and one selected style range without same-dimension mixing",
                     },
                 },
                 ensure_ascii=True,
@@ -741,9 +1467,20 @@ def main() -> int:
         raise ValueError("User-specified mode is supported only with --stage finalize")
 
     basis = validate_basis(args.stage, args.basis)
+    selected_colors: list[dict[str, object]] = []
     if args.stage == "style":
-        if not selected_color or selected_color["stage"] != "color":
+        if not args.selected_color_id:
             raise ValueError("Style recommendations require --selected-color-id")
+        selected_colors = cli_selection_items(
+            "color",
+            args.selected_color_id,
+            args.selected_color_label,
+            args.selected_color_round,
+            args.selected_color_option,
+            library,
+            profile,
+            user_specified=False,
+        )
     elif args.selected_color_id:
         raise ValueError("Color-stage recommendations must not preselect a color")
 
@@ -774,7 +1511,7 @@ def main() -> int:
         "profile_version": profile["profile_version"],
         "character_profile_sha256": profile["_profile_sha256"],
         "evidence_basis": basis,
-        "selected_color_id": selected_color["id"] if selected_color else "",
+        "selected_colors": selected_colors,
         "option_ids": [row["id"] for row in rows],
         "reasons": [value.strip() for value in args.reason],
     }
@@ -784,6 +1521,21 @@ def main() -> int:
         option_payload(row, reason, index, args.stage, args.round)
         for index, (row, reason) in enumerate(zip(rows, args.reason), start=1)
     ]
+    retained = parse_retained_items(args.retained_selection_json, args.stage)
+    selection_resolution = None
+    if args.selection_expression is not None:
+        selection_resolution = resolve_selection_expression(
+            args.selection_expression,
+            rows,
+            args.stage,
+            args.round,
+            profile,
+            library,
+            retained,
+        )
+        selection_resolution["next_exclude_ids"] = sorted(
+            excluded_ids | {row["id"] for row in rows}
+        )
     print(
         json.dumps(
             {
@@ -791,15 +1543,23 @@ def main() -> int:
                 **recommendation_core,
                 "eligible_style_groups": eligible_groups if args.stage == "style" else [],
                 "recommendation_fingerprint": fingerprint(recommendation_core),
+                "selection_mode": "multi-range-union",
+                "selection_guidance": WARDROBE_SELECTION_GUIDANCE,
                 "selected_color": (
                     {
-                        "id": selected_color["id"],
-                        "label": selected_color["label_cn"],
-                        "visual_direction": selected_color["visual_direction"],
+                        "id": selected_colors[0]["id"],
+                        "label": selected_colors[0]["label"],
+                        "visual_direction": library[
+                            str(selected_colors[0]["id"])
+                        ]["visual_direction"],
                     }
-                    if selected_color
+                    if len(selected_colors) == 1
+                    and selected_colors[0]["source"] == "library"
                     else None
                 ),
+                "selected_colors": selected_colors,
+                "retained_selections": retained,
+                "selection_resolution": selection_resolution,
                 "options": options,
                 "more_option": {
                     "index": 4,
@@ -808,6 +1568,8 @@ def main() -> int:
                     "next_round": args.round + 1,
                     "preserves_selected_color": args.stage == "style",
                     "preserves_style_group": args.stage == "style",
+                    "preserves_retained_selections": True,
+                    "never_enters_selected_ranges": True,
                 },
             },
             ensure_ascii=True,

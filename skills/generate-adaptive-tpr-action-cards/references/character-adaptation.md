@@ -39,13 +39,13 @@ Use exactly one mode for a batch:
 
 Keep the selected persona stable across a batch. A persona may guide energy, styling, and expression vocabulary, but it must not make every card use the same pose or emotion.
 
-For a new batch, first let the model recommend three broad color directions from the approved library. Before the conditioned style round, resolve the internal clothing-presentation scope from the approved profile: child/adult × masculine/feminine when medium/high evidence is clear, otherwise `shared`. This scope is not a gender-identity claim and adds no routine question. Each screen adds `更多其他`; it refreshes only that screen with next-best unshown IDs while preserving the resolved scope. Never mechanically randomize the recommendations. Once both choices are selected, record `specified` mode and keep both broad ranges stable across cards. Explicit cross-presentation text remains user-specified, while the minor/adult safety domain never changes silently.
+For a new batch, first let the model recommend three broad color directions from the approved library and allow the user to retain one or more. Before the conditioned style round, resolve the internal clothing-presentation scope from the approved profile: child/adult × masculine/feminine when medium/high evidence is clear, otherwise `shared`. This scope is not a gender-identity claim and adds no routine question. The style round conditions on the complete selected color set and also allows one or more retained styles. Each screen adds `更多其他`; when 4 appears in a combination, retain and deduplicate the simultaneously selected 1–3 keys plus earlier retained keys, refresh only that screen with next-best unshown IDs, and never put 4 in the selected set or fingerprint. Never mechanically randomize the recommendations. Once both non-empty sets are finalized, record `specified` mode and keep the canonical selected sets stable across cards. Explicit cross-presentation text remains user-specified, while the minor/adult safety domain never changes silently.
 
 ## Apply wardrobe policy
 
 Use one profile policy:
 
-- `varied`: create a distinct, action-safe full outfit for each card. After both broad ranges are selected, rebuild the approved pools with at least four sub-palettes, four silhouettes, and four substyles inside those ranges. Cover every value before reuse and vary layering, material, texture, trim, and restrained accessories visibly.
+- `varied`: create a distinct, action-safe full outfit for each card. After both selected sets are finalized, rebuild profile-v2 `wardrobe_range_pools_json` with at least four sub-palettes per selected color key and four silhouettes/substyles per applicable selected style key. Cover assigned key pairs and their values before reuse and vary layering, material, texture, trim, and restrained accessories visibly.
 - `signature-variants`: preserve `signature_outfit` or signature costume elements in every mode, including `specified`, while varying approved secondary colors, layers, accessories, or silhouettes. A user-specified style may change secondary factors but cannot silently remove the character's approved signature design.
 - `fixed`: reproduce the approved `signature_outfit`; repeated clothing is correct and must not fail diversity checks.
 - `none`: use `not-applicable` for outfit, color, silhouette, and style. Do not add clothing merely to satisfy a diversity rule.
@@ -54,7 +54,7 @@ Wardrobe safety review applies only to `infant`, `toddler`, `child`, `teen`, `ju
 
 For every clearly adult profile, never place `nonsexualized`, `never sexualize`, `opaque from neckline to ankles`, forced full coverage, or generic bans on low necklines, bare midriffs, sleeveless/camisole/strapless/off-shoulder/open-back/short-hem/high-slit/swimwear, sheer fabrics, or heels in `action_safety_notes`, `avoid_outfit_features`, or a work packet. A translucent or revealing adult garment is not a Skill-level safety failure. If the user explicitly requests a conservative adult direction, encode it as positive outfit factors rather than a safety prohibition.
 
-Do not use profile factor lists to choose the visible Round-1 or Round-2 recommendations. After selection, treat them as the audited expansion of the chosen ranges. Keep `outfit_style` within the selected broad style family and `outfit_color` within the selected broad color direction. Cover every approved factor before reuse, balance long-batch cycles, and add action-specific layering, material, texture, trim, or restrained accessory detail so complete outfits stay visibly different. `outfit_color`, `outfit_silhouette`, and `outfit_style` must exactly name selected profile factors.
+Do not use profile factor lists to choose the visible Round-1 or Round-2 recommendations. After selection, treat `wardrobe_range_pools_json` as the audited, range-keyed expansion of the chosen sets. A v2 manifest keeps `wardrobe_selection_schema_version=2`, canonical `wardrobe_selected_ranges_json`, and `wardrobe_assignment_strategy=balanced-scattered-v1` stable; each row records exactly one `assigned_color_direction_key` and one `assigned_style_family_key`. Keep `outfit_color` inside the row's assigned color pool and `outfit_style`/applicable silhouette factors inside the row's assigned style pool. Never combine two ranges from the same dimension in one outfit. Cover every approved assigned-pair factor before reuse, balance and deterministically scatter long-batch pair cycles, and add action-specific layering, material, texture, trim, or restrained accessory detail so complete outfits stay visibly different. `outfit_color`, `outfit_silhouette`, and `outfit_style` must exactly name factors authorized for that row's assignments.
 
 ## Adapt actions to character type
 
@@ -77,8 +77,8 @@ Include only useful profile data:
 - Selected persona and exact wardrobe factors.
 - Signature elements and `do_not_change` traits.
 - Action-specific safety and ambiguity cues.
-- A separate wardrobe gate: the minor/age-uncertain nonsexualization rule, or an explicit statement that a clearly adult profile receives no Skill-level wardrobe restriction. Do not add adult coverage or exposure prohibitions.
-- The selected `background_mode` and the row's exact `background_treatment`; treat uploaded backgrounds as non-binding reference content.
+- A separate wardrobe gate only for a minor or age-uncertain profile. For a clearly adult profile, keep `adult-none` as structured packet metadata but add no prose about coverage, exposure, sensuality, garment type, or the absence of restrictions.
+- A background instruction only when the user explicitly requested one. Under `background_mode=unspecified`, leave `background_treatment` empty and omit the entire background concept, including labels such as `Background treatment:`.
 - The selected generation interface's supported reference-image and prompt fields; keep the identity, wardrobe, action, background, and safety contract semantically identical across recommended and custom backends.
 
 Do not include uncertain gender or age labels merely to force a stereotype. Prefer direct visual descriptions such as “soft rounded silhouette, short limbs, neutral playful overalls” over demographic assumptions. Never put an API key, token, or other authentication secret into the generation instruction.
@@ -92,8 +92,8 @@ Judge the finished card against the profile and the actual reference:
 - Apparent life stage remains credible without exaggeration.
 - Styling does not rely on an unsupported gender stereotype.
 - Persona and outfit support the action instead of obscuring it.
-- The rendered background follows the selected batch mode, matches the recorded treatment, preserves subject/action contrast, and does not introduce identity evidence, text, branding, or distracting people/props.
+- When a background was explicitly requested, the rendered background follows it. Under `unspecified`, do not compare the result against an invented treatment; judge only general card readability and unwanted text/people/props.
 - The rendered result satisfies the same card contract regardless of the selected Skill/API; a custom backend does not relax identity, anatomy, action clarity, composition, or safety QA.
 - Fixed or no-clothing policies are not penalized for repetition.
-- Wardrobe recommendations are traceable to library IDs, the profile hash, non-sensitive evidence tokens, round/option records, and a final fingerprint. They are model-curated rather than shuffled, and never alter identity or persona.
+- Wardrobe recommendations are traceable to the canonical selected key sets, profile hash, non-sensitive evidence tokens, round/option or direct-label provenance, v2 schema, assignment strategy, per-row assignments, and a final fingerprint. Option 4 is never selection evidence. Frozen v1 single-selection records remain verify-only. Recommendations are model-curated rather than shuffled and never alter identity or persona.
 - The finished set visibly maximizes variation inside the selected ranges; changing only a minor trim, accessory, or nearly identical shade does not pass.

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import json
 import os
 import re
 import tempfile
@@ -17,7 +18,9 @@ WORD_IDENTIFIER_VISIBILITIES = {"hidden", "shown"}
 DEFAULT_WORD_IDENTIFIER_VISIBILITY = "hidden"
 SUBAGENT_PARALLELISM_CHOICES = {"enabled", "disabled", "custom"}
 DEFAULT_SUBAGENT_CONCURRENCY = 4
-BACKGROUND_MODES = {"auto-varied", "pure-white"}
+# New batches use ``unspecified`` unless the user explicitly supplies a
+# background. ``auto-varied`` remains accepted for legacy/resumed manifests.
+BACKGROUND_MODES = {"unspecified", "pure-white", "specified", "auto-varied"}
 EXECUTION_BACKGROUND_FIELDS = (
     "subagent_parallelism",
     "subagent_concurrency",
@@ -47,17 +50,46 @@ WARDROBE_SELECTION_FIELDS = (
     "style_choice_option",
     "wardrobe_custom_override",
 )
+WARDROBE_V2_BATCH_FIELDS = (
+    "wardrobe_selection_schema_version",
+    "wardrobe_selected_ranges_json",
+    "wardrobe_assignment_strategy",
+)
+WARDROBE_V2_ASSIGNMENT_FIELDS = (
+    "assigned_color_direction_key",
+    "assigned_style_family_key",
+)
+ALL_WARDROBE_FIELDS = (
+    *WARDROBE_SELECTION_FIELDS,
+    *WARDROBE_V2_BATCH_FIELDS,
+    *WARDROBE_V2_ASSIGNMENT_FIELDS,
+)
 WARDROBE_RECOMMENDATION_METHODS = {
     "model-curated",
     "user-specified",
+    "mixed",
     "not-applicable",
 }
+WARDROBE_ASSIGNMENT_MULTI_VALUE_RE = re.compile(r"[;,+/]")
 
 
 def read_manifest(path: Path) -> tuple[list[str], list[dict[str, str]]]:
     with path.open(newline="", encoding="utf-8-sig") as handle:
         reader = csv.DictReader(handle)
         fieldnames = list(reader.fieldnames or [])
+        malformed_headers = [name for name in fieldnames if name != name.strip()]
+        if malformed_headers:
+            raise ValueError(
+                "Manifest field names must not have leading or trailing whitespace: "
+                f"{malformed_headers}"
+            )
+        duplicate_headers = sorted(
+            {name for name in fieldnames if fieldnames.count(name) > 1}
+        )
+        if duplicate_headers:
+            raise ValueError(
+                f"Manifest contains duplicate field names {duplicate_headers}"
+            )
         required = {
             "source_row",
             "raw_identifier",
@@ -86,6 +118,23 @@ def read_manifest(path: Path) -> tuple[list[str], list[dict[str, str]]]:
             raise ValueError(
                 "Manifest has a partial two-round wardrobe schema; missing "
                 f"{sorted(wardrobe_fields - present_wardrobe_fields)}"
+            )
+        wardrobe_v2_fields = set(
+            (*WARDROBE_V2_BATCH_FIELDS, *WARDROBE_V2_ASSIGNMENT_FIELDS)
+        )
+        present_wardrobe_v2_fields = wardrobe_v2_fields & set(fieldnames)
+        if (
+            present_wardrobe_v2_fields
+            and present_wardrobe_v2_fields != wardrobe_v2_fields
+        ):
+            raise ValueError(
+                "Manifest has a partial wardrobe v2 schema; missing "
+                f"{sorted(wardrobe_v2_fields - present_wardrobe_v2_fields)}"
+            )
+        if present_wardrobe_v2_fields and present_wardrobe_fields != wardrobe_fields:
+            raise ValueError(
+                "Manifest wardrobe v2 schema requires the complete legacy wardrobe "
+                f"projection; missing {sorted(wardrobe_fields - present_wardrobe_fields)}"
             )
         execution_background_fields = set(EXECUTION_BACKGROUND_FIELDS)
         present_execution_background_fields = execution_background_fields & set(fieldnames)
@@ -121,7 +170,7 @@ def read_manifest(path: Path) -> tuple[list[str], list[dict[str, str]]]:
                 "character_id",
                 "character_profile_version",
                 "character_profile_sha256",
-                *WARDROBE_SELECTION_FIELDS,
+                *ALL_WARDROBE_FIELDS,
                 *EXECUTION_BACKGROUND_FIELDS,
                 *GENERATION_BACKEND_FIELDS,
             ):
@@ -179,6 +228,81 @@ def read_manifest(path: Path) -> tuple[list[str], list[dict[str, str]]]:
     return fieldnames, rows
 
 
+def validate_wardrobe_assignment_key(
+    value: str,
+    *,
+    field: str,
+    identifier: str,
+    required: bool,
+) -> list[str]:
+    """Require one auditable range key rather than a packed multi-value cell."""
+    if not value:
+        return [f"{identifier}: {field} is empty"] if required else []
+    if WARDROBE_ASSIGNMENT_MULTI_VALUE_RE.search(value):
+        return [
+            f"{identifier}: {field} must contain exactly one range key; "
+            "multi-value delimiters ; , + / are not allowed"
+        ]
+    return []
+
+
+def validate_wardrobe_v2_provenance(row: dict[str, str]) -> tuple[bool, list[str]]:
+    """Validate the self-contained structural envelope for wardrobe selection v2."""
+    identifier = row.get("number", "?")
+    v2_fields = (*WARDROBE_V2_BATCH_FIELDS, *WARDROBE_V2_ASSIGNMENT_FIELDS)
+    active = any(row.get(field, "") for field in v2_fields)
+    if not active:
+        return False, []
+
+    errors: list[str] = []
+    for field in v2_fields:
+        if not row.get(field, ""):
+            errors.append(f"{identifier}: wardrobe v2 requires non-empty {field}")
+
+    if row.get("wardrobe_selection_schema_version", "") != "2":
+        errors.append(
+            f"{identifier}: wardrobe_selection_schema_version must be 2 for wardrobe v2"
+        )
+
+    serialized = row.get("wardrobe_selected_ranges_json", "")
+    if serialized:
+        try:
+            selection = json.loads(serialized)
+        except json.JSONDecodeError as error:
+            errors.append(
+                f"{identifier}: wardrobe_selected_ranges_json is invalid JSON: {error.msg}"
+            )
+        else:
+            if not isinstance(selection, dict):
+                errors.append(
+                    f"{identifier}: wardrobe_selected_ranges_json must be a JSON object"
+                )
+            else:
+                for dimension in ("colors", "styles"):
+                    entries = selection.get(dimension)
+                    if not isinstance(entries, list) or not entries:
+                        errors.append(
+                            f"{identifier}: wardrobe_selected_ranges_json.{dimension} "
+                            "must be a non-empty array"
+                        )
+                    elif any(not isinstance(entry, dict) for entry in entries):
+                        errors.append(
+                            f"{identifier}: wardrobe_selected_ranges_json.{dimension} "
+                            "entries must be JSON objects"
+                        )
+
+    for field in WARDROBE_V2_ASSIGNMENT_FIELDS:
+        errors.extend(
+            validate_wardrobe_assignment_key(
+                row.get(field, ""),
+                field=field,
+                identifier=identifier,
+                required=True,
+            )
+        )
+    return True, errors
+
+
 def validate_wardrobe_provenance(row: dict[str, str]) -> list[str]:
     """Validate one row's two-round selection record without inferring aesthetics."""
     errors: list[str] = []
@@ -187,6 +311,27 @@ def validate_wardrobe_provenance(row: dict[str, str]) -> list[str]:
     identifier = row.get("number", "?")
     if method not in WARDROBE_RECOMMENDATION_METHODS:
         return [f"{identifier}: invalid wardrobe_recommendation_method {method!r}"]
+
+    is_v2, v2_errors = validate_wardrobe_v2_provenance(row)
+    if is_v2:
+        errors.extend(v2_errors)
+        if policy in {"fixed", "none"}:
+            errors.append(
+                f"{identifier}: wardrobe selection v2 is not applicable to {policy} wardrobe"
+            )
+            return errors
+        if method == "not-applicable":
+            errors.append(
+                f"{identifier}: varied wardrobe requires a selected color and style direction"
+            )
+        if not row.get("wardrobe_library_version", ""):
+            errors.append(f"{identifier}: wardrobe_library_version is empty")
+        digest = row.get("wardrobe_recommendation_fingerprint", "").casefold()
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            errors.append(f"{identifier}: wardrobe_recommendation_fingerprint is invalid")
+        if not row.get("wardrobe_evidence_basis", ""):
+            errors.append(f"{identifier}: wardrobe_evidence_basis is empty")
+        return errors
 
     if policy in {"fixed", "none"}:
         expected_na = (
@@ -212,6 +357,11 @@ def validate_wardrobe_provenance(row: dict[str, str]) -> list[str]:
 
     if method == "not-applicable":
         errors.append(f"{identifier}: varied wardrobe requires a selected color and style direction")
+        return errors
+    if method == "mixed":
+        errors.append(
+            f"{identifier}: mixed wardrobe recommendations require wardrobe selection v2"
+        )
         return errors
     if not row.get("wardrobe_library_version", ""):
         errors.append(f"{identifier}: wardrobe_library_version is empty")
@@ -300,8 +450,15 @@ def validate_execution_background_rows(rows: list[dict[str, str]]) -> list[str]:
         )
         if background_mode not in BACKGROUND_MODES:
             errors.append(
-                f"{identifier}: background_mode must be auto-varied or pure-white"
+                f"{identifier}: background_mode must be unspecified, pure-white, "
+                "specified, or legacy auto-varied"
             )
+        elif background_mode == "unspecified":
+            if treatment:
+                errors.append(
+                    f"{identifier}: unspecified background_mode requires an empty "
+                    "background_treatment"
+                )
         elif background_mode == "pure-white":
             if treatment != "pure-white":
                 errors.append(
@@ -309,7 +466,8 @@ def validate_execution_background_rows(rows: list[dict[str, str]]) -> list[str]:
                 )
         elif not treatment or treatment == "pure-white":
             errors.append(
-                f"{identifier}: auto-varied mode requires a non-white recorded background_treatment"
+                f"{identifier}: {background_mode} mode requires a non-white recorded "
+                "background_treatment"
             )
 
     subagent_policies = {

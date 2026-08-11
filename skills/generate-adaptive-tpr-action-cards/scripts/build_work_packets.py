@@ -11,12 +11,19 @@ import re
 import tempfile
 from pathlib import Path
 
-from batch_common import read_manifest, select_rows, sha256_file
+from batch_common import (
+    WARDROBE_V2_ASSIGNMENT_FIELDS,
+    WARDROBE_V2_BATCH_FIELDS,
+    read_manifest,
+    select_rows,
+    sha256_file,
+    validate_wardrobe_assignment_key,
+)
 from character_profile import load_profiles, split_values, validate_manifest_profiles
 from wardrobe_choice import resolve_age_domain
 
 
-PACKET_SCHEMA_VERSION = "2026.08.1"
+PACKET_SCHEMA_VERSION = "2026.08.3"
 SAFE_PACKET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -56,15 +63,54 @@ def build_packet(
     reference_path: str,
 ) -> dict[str, object]:
     """Build one prompt only from current validated structured inputs."""
+    identifier = row.get("number", "?")
+    selection_schema_version = row.get(
+        "wardrobe_selection_schema_version", ""
+    ).strip()
+    v2_active = any(
+        row.get(field, "")
+        for field in (*WARDROBE_V2_BATCH_FIELDS, *WARDROBE_V2_ASSIGNMENT_FIELDS)
+    )
+    assigned_color_key = row.get("assigned_color_direction_key", "").strip()
+    assigned_style_key = row.get("assigned_style_family_key", "").strip()
+    if not v2_active:
+        assigned_color_key = assigned_color_key or row.get(
+            "color_direction_id", ""
+        ).strip()
+        assigned_style_key = assigned_style_key or row.get(
+            "style_family_id", ""
+        ).strip()
+
+    assignment_errors: list[str] = []
+    for field, value in (
+        ("assigned_color_direction_key", assigned_color_key),
+        ("assigned_style_family_key", assigned_style_key),
+    ):
+        assignment_errors.extend(
+            validate_wardrobe_assignment_key(
+                value,
+                field=field,
+                identifier=identifier,
+                required=v2_active,
+            )
+        )
+    if v2_active and selection_schema_version != "2":
+        assignment_errors.append(
+            f"{identifier}: wardrobe_selection_schema_version must be 2"
+        )
+    if assignment_errors:
+        raise ValueError(
+            "Invalid wardrobe range assignment:\n- "
+            + "\n- ".join(assignment_errors)
+        )
+
     age_domain = resolve_age_domain(profile)
     if age_domain == "adult":
         wardrobe_safety_scope = "adult-none"
-        wardrobe_rule = (
-            "Adult wardrobe safety scope: adult-none. Apply no Skill-level "
-            "coverage, exposure, sensuality, garment-type, material, or "
-            "styling-scale review. Render the exact approved adult outfit "
-            "direction at its full requested intensity."
-        )
+        # Keep the adult scope as structured audit metadata only. Explicit
+        # no-restriction prose adds no visual value and can itself trip a
+        # backend classifier. The absence of a minor-only rule is sufficient.
+        wardrobe_rule = ""
         minor_safety_notes: list[str] = []
         minor_avoid_features: list[str] = []
     else:
@@ -87,6 +133,7 @@ def build_packet(
     ]
     action_instruction = " ".join(part for part in action_parts if part)
     outfit = row.get("outfit", "").strip()
+    background_mode = row.get("background_mode", "").strip().casefold()
     background = row.get("background_treatment", "").strip()
     identity = profile.get("identity_anchors", "").strip()
     proportions = profile.get("proportion_summary", "").strip()
@@ -101,14 +148,17 @@ def build_packet(
     ]
     if signature and signature.casefold() != "not-applicable":
         prompt_parts.append(f"Preserve signature outfit elements: {signature}.")
-    prompt_parts.extend(
-        [
-            wardrobe_rule,
-            f"Background treatment: {background}.",
-            "Keep the full body and action-critical limbs visible. Leave clear "
-            "bottom space for later captions. Do not render captions, identifiers, "
-            "logos, borders, unrelated people, or watermarks.",
-        ]
+    if wardrobe_rule:
+        prompt_parts.append(wardrobe_rule)
+    if background:
+        if background_mode == "pure-white":
+            prompt_parts.append("Background: pure white.")
+        elif background_mode in {"specified", "auto-varied"}:
+            prompt_parts.append(f"Background: {background}.")
+    prompt_parts.append(
+        "Keep the full body and action-critical limbs visible. Leave clear "
+        "bottom space for later captions. Do not render captions, identifiers, "
+        "logos, borders, unrelated people, or watermarks."
     )
     if minor_safety_notes:
         prompt_parts.append(
@@ -134,6 +184,12 @@ def build_packet(
         "generation_model": row.get("generation_model", ""),
         "age_domain": age_domain,
         "wardrobe_safety_scope": wardrobe_safety_scope,
+        "wardrobe_selection_schema_version": selection_schema_version or "1",
+        "wardrobe_assignment_strategy": row.get(
+            "wardrobe_assignment_strategy", ""
+        ),
+        "assigned_color_direction_key": assigned_color_key,
+        "assigned_style_family_key": assigned_style_key,
         "minor_safety_notes": minor_safety_notes,
         "minor_avoid_features": minor_avoid_features,
         "prompt": prompt,
