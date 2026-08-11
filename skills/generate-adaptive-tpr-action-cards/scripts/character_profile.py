@@ -115,6 +115,77 @@ SUITABILITY_HANDLINGS = {
 }
 CHARACTER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 TOKEN_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+ADULT_CHILD_SAFETY_LOCK_NOTE_MARKERS = (
+    "nonsexualized",
+    "non-sexualized",
+    "never sexualize",
+    "do not sexualize",
+    "不得性感化",
+    "不得性化",
+    "非性感化",
+    "全覆盖服装",
+    "全身遮盖",
+    "不得露肤",
+    "opaque from neckline to ankles",
+    "fully opaque",
+    "opaque clothing",
+    "modest clothing",
+    "conservative clothing",
+    "fully clothed",
+    "fully covered",
+    "non-exposing",
+    "no exposure",
+    "不透明服装",
+    "保守服装",
+    "完全穿着",
+    "完全遮盖",
+    "不得暴露",
+)
+ADULT_CHILD_SAFETY_LOCK_AVOID_MARKERS = (
+    "low neckline",
+    "bare midriff",
+    "lingerie styling",
+    "lingerie-inspired",
+    "sleeveless",
+    "camisole",
+    "strapless",
+    "off-shoulder",
+    "open-back",
+    "high slit",
+    "short hem",
+    "short-hem",
+    "swimwear",
+    "bikini",
+    "cleavage",
+    "sheer or translucent fabric",
+    "sheer fabric",
+    "translucent fabric",
+    "transparent fabric",
+    "revealing clothing",
+    "revealing outfit",
+    "nudity",
+    "high heels",
+    "低领",
+    "露脐",
+    "露腰",
+    "内衣风",
+    "无袖",
+    "吊带",
+    "抹胸",
+    "露肩",
+    "露背",
+    "高开衩",
+    "短下装",
+    "短裙",
+    "泳装",
+    "比基尼",
+    "乳沟",
+    "透视",
+    "透明材质",
+    "裸露",
+    "裸体",
+    "高跟鞋",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -166,6 +237,45 @@ def profile_sha256(row: dict[str, str]) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def adult_profile_wardrobe_lock_conflicts(profile: dict[str, str]) -> list[str]:
+    """Find child-only coverage or sexualization locks copied into an adult profile."""
+    notes = profile.get("action_safety_notes", "").casefold()
+    avoid = profile.get("avoid_outfit_features", "").casefold()
+    conflicts = [
+        f"action_safety_notes:{marker}"
+        for marker in ADULT_CHILD_SAFETY_LOCK_NOTE_MARKERS
+        if marker.casefold() in notes
+    ]
+    conflicts.extend(
+        f"avoid_outfit_features:{marker}"
+        for marker in ADULT_CHILD_SAFETY_LOCK_AVOID_MARKERS
+        if marker.casefold() in avoid
+    )
+    return list(dict.fromkeys(conflicts))
+
+
+def validate_adult_profile_wardrobe_lock(
+    profile: dict[str, str],
+    row: dict[str, str],
+    *,
+    age_domain: str,
+) -> list[str]:
+    """Keep child-only wardrobe safety review out of clearly adult profiles."""
+    if age_domain != "adult":
+        return []
+    identifier = row.get("number", "?")
+    conflicts = adult_profile_wardrobe_lock_conflicts(profile)
+    if conflicts:
+        return [
+            f"{identifier}: clearly adult profile contains child-only wardrobe safety "
+            f"locks {conflicts}; remove coverage/sexualization restrictions from the "
+            "profile, express any user-requested conservative aesthetic only in the "
+            "selected outfit pools, increment profile_version, and re-finalize the "
+            "wardrobe fingerprint"
+        ]
+    return []
 
 
 def validate_profile_row(row: dict[str, str], line: int) -> list[str]:
@@ -354,10 +464,24 @@ def validate_manifest_profiles(
     profiles: dict[str, dict[str, str]],
     manifest: Path,
     selected_rows: list[dict[str, str]] | None = None,
+    wardrobe_library: dict[str, dict[str, str]] | None = None,
 ) -> list[str]:
+    # Import lazily because wardrobe_choice imports load_profiles from this
+    # module.  The local import lets profile-aware plan and delivery gates bind
+    # a current model-curated style to its resolved recommendation group
+    # without introducing an import cycle during CLI startup.
+    from wardrobe_choice import (
+        DEFAULT_LIBRARY as DEFAULT_WARDROBE_LIBRARY,
+        load_library as load_wardrobe_library,
+        resolve_age_domain,
+        validate_model_curated_binding,
+    )
+
     errors: list[str] = []
     fieldnames, all_rows = read_manifest(manifest)
     rows = all_rows if selected_rows is None else selected_rows
+    if wardrobe_library is None:
+        wardrobe_library = load_wardrobe_library(DEFAULT_WARDROBE_LIBRARY)
     required_fields = {
         "character_id",
         "character_profile_version",
@@ -401,6 +525,14 @@ def validate_manifest_profiles(
             errors.append(f"{identifier}: specified mode requires persona")
 
         errors.extend(validate_wardrobe_provenance(row))
+        errors.extend(validate_model_curated_binding(row, wardrobe_library, profile))
+        errors.extend(
+            validate_adult_profile_wardrobe_lock(
+                profile,
+                row,
+                age_domain=resolve_age_domain(profile),
+            )
+        )
 
         required_caps = split_values(row.get("required_render_capabilities", ""))
         if not required_caps:

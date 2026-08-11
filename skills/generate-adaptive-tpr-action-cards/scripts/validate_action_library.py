@@ -18,7 +18,14 @@ SUITABILITY_HANDLING = {
     "symbolic-safe-only",
     "layered-safe-only",
 }
-SUITABILITY_FIELDS = {"number", "context_tags", "default_handling", "adaptation_note"}
+SUITABILITY_SCOPES = {"all", "minor-only"}
+SUITABILITY_FIELDS = {
+    "number",
+    "context_tags",
+    "default_handling",
+    "safety_scope",
+    "adaptation_note",
+}
 
 
 def normalize_english(value: str) -> str:
@@ -187,6 +194,11 @@ def validate_suitability_rows(
             errors.append(
                 f"Suitability line {line}: unsupported default_handling "
                 f"{row.get('default_handling')!r}"
+            )
+        if row.get("safety_scope") not in SUITABILITY_SCOPES:
+            errors.append(
+                f"Suitability line {line}: unsupported safety_scope "
+                f"{row.get('safety_scope')!r}"
             )
         if not row.get("adaptation_note"):
             errors.append(f"Suitability line {line}: adaptation_note is empty")

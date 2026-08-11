@@ -156,7 +156,14 @@ def verify_manifest_profile_binding(
             "--character-profile or place character_profile.csv beside the manifest"
         ]
     profiles, errors = load_profiles(profile_path)
-    errors.extend(validate_manifest_profiles(profiles, manifest, selected_rows=rows))
+    errors.extend(
+        validate_manifest_profiles(
+            profiles,
+            manifest,
+            selected_rows=rows,
+            wardrobe_library=WARDROBE_LIBRARY,
+        )
+    )
     errors.extend(validate_execution_background_rows(rows))
     errors.extend(validate_generation_backend_rows(rows))
     character_ids = {row.get("character_id", "") for row in rows}

@@ -6,7 +6,7 @@ Use this protocol for every new `varied` or `signature-variants` batch unless th
 
 The word “随机推荐” in a user request means “show me varied recommendations”, not permission to shuffle the library. Inspect the approved originals and character profile, then let the model rank options from [wardrobe-option-library.csv](wardrobe-option-library.csv). Never use an RNG, seed, hash order, profile-pool product, or first-three rows to decide the visible choices.
 
-Use apparent age, proportions, and appearance only as conservative visual design evidence. Do not infer demographic identity or evaluate attractiveness, body value, health, personality, occupation, or social status. When evidence is weak or inconsistent across originals, say less and favor broadly compatible `core` entries.
+Use apparent age, proportions, and appearance only as visual design evidence and an age gate. Do not infer demographic identity or evaluate attractiveness, body value, health, personality, occupation, or social status. The four narrow style groups are clothing-presentation scopes, not gender-identity claims. Keep minors and age-uncertain subjects nonsexualized; for clearly adult-presenting subjects, do not suppress an explicit sensual-fashion preference. When age or presentation evidence is low, uncertain, neutral, androgynous, not applicable, or nonhuman, use the `shared` style scope.
 
 ## Round 1: choose a color direction
 
@@ -34,9 +34,9 @@ If `更多其他` is chosen, increment the color round, select the next-best thr
 
 After the user selects a color ID:
 
-1. Read all CSV rows with `stage=style`.
-2. Rerank them using the approved visible evidence, apparent-life-stage and anatomy safety, TPR clarity, durable popularity tier, and the selected color row's visual direction and diversity contract.
-3. Choose exactly three materially different IDs from at least two library families, avoiding `near_neighbors` and concrete garment recipes.
+1. Read all CSV rows with `stage=style` and let the validator resolve `child-masculine`, `child-feminine`, `adult-masculine`, `adult-feminine`, or `shared` from the approved profile.
+2. For a narrow target, rerank that group's rows plus `shared`; at least two visible recommendations must be group-specific. For a shared target, use shared rows only. Apply the minor/adult age gate, anatomy safety, TPR clarity, durable popularity tier, and the selected color row's visual direction and diversity contract. A clearly adult-presenting subject's explicit sensual-fashion request is allowed; do not silently replace it with conservative full coverage.
+3. Choose exactly three materially different eligible IDs from at least two library families, avoiding `near_neighbors` and concrete garment recipes.
 4. Validate and format them while binding the selected color:
 
 ```bash
@@ -53,13 +53,13 @@ python3 scripts/wardrobe_choice.py BATCH_DIR/character_profile.csv \
 
 5. Show exactly the returned three broad style labels and reasons plus `更多其他`. Do not specify上衣、裙裤、鞋、配饰或整套搭配。
 
-If `更多其他` is chosen, increment the style round, preserve the selected color ID, exclude all previously shown style IDs, and return the next-best three. Do not rerun or alter Round 1.
+If `更多其他` is chosen, increment the style round, preserve the selected color ID and resolved style group, exclude all previously shown style IDs, and return the next-best three. Do not rerun or alter Round 1.
 
 ## Interaction surface
 
 Use the host's native single-select control when available. Each round must have exactly four options: three recommendations and `更多其他`. If no native control is exposed, omit all raw widget markers and show the complete four numbered labels and descriptions; accept `1`–`4`.
 
-Option 4 is a refresh command, not a selection. Do not add `跳过`, `默认`, `全部随机`, `直接生成`, or a fifth option. Accept exact custom color or style text in free text; record it as `user-specified` and do not force it into an inaccurate library ID.
+Option 4 is a refresh command, not a selection. Do not add `跳过`, `默认`, `全部随机`, `直接生成`, or a fifth option. For a clearly adult profile, accept exact custom color or style text in free text, record it as `user-specified`, and do not force it into an inaccurate library ID. For infant, toddler, child, teen, juvenile, or age-uncertain profiles, do not finalize free-text/user-specified wardrobe: use an eligible model-curated minor-safe library direction or pause until the age domain is clearly adult. This deterministic boundary prevents open-ended text from bypassing child safety.
 
 ## Finalize and expand
 
@@ -71,6 +71,20 @@ python3 scripts/wardrobe_choice.py BATCH_DIR/character_profile.csv \
   --selected-color-id SELECTED_COLOR_ID \
   --selected-style-id SELECTED_STYLE_ID
 ```
+
+For exact free-text or cross-presentation direction, create the user-specified fingerprint through the same CLI rather than inventing a digest:
+
+```bash
+python3 scripts/wardrobe_choice.py BATCH_DIR/character_profile.csv \
+  --character-id CHARACTER_ID --stage finalize \
+  --recommendation-method user-specified \
+  --selected-color-id C06 \
+  --selected-style-id S67 \
+  --custom-override "用户的原始宽泛方向" \
+  --basis user-preference
+```
+
+Use `CUSTOM` for either ID only when no library entry is accurate and the profile is clearly adult, then also pass its exact `--selected-color-label` or `--selected-style-label`. Adult custom text is not assigned an extra safety classification or clothing-scale restriction. The current fingerprint binds the exact override, evidence basis, profile hash, IDs/labels, and resolved age domain; changing any of them requires re-finalization.
 
 Record the final fingerprint and every selection field from `assets/batch_manifest.csv` on all selected rows. Use `adaptation_mode=specified`; keep `adaptation_seed` empty unless another explicit, non-recommendation process needs it. Store only short non-sensitive evidence tokens in `wardrobe_evidence_basis`, never private body commentary.
 
@@ -87,7 +101,7 @@ Increment the profile version and revalidate after replacing provisional pools. 
 
 For a model-curated selection, record:
 
-- `wardrobe_library_version=2026.08`;
+- `wardrobe_library_version=2026.08.1`; frozen model-curated `2026.08` manifest fingerprints remain verify-only against the bundled active library's preserved `C01`–`C18` and `S01`–`S24` IDs/labels, while legacy user-specified rows must be reviewed and re-finalized because their old digest cannot bind exact override text; a legacy-schema CSV must never drive new recommendations or finalization;
 - `wardrobe_recommendation_method=model-curated`;
 - the final `wardrobe_recommendation_fingerprint`;
 - non-sensitive `wardrobe_evidence_basis` tokens;
@@ -95,4 +109,4 @@ For a model-curated selection, record:
 - selected style ID, label, refresh round, and option index;
 - an empty `wardrobe_custom_override`.
 
-For explicit custom text, use `wardrobe_recommendation_method=user-specified`, retain a compatible library ID or `CUSTOM`, store the exact text in `wardrobe_custom_override`, and create a new fingerprint. For `fixed` or `none`, use the manifest's defined `not-applicable` and zero values.
+For explicit adult custom text, use `wardrobe_recommendation_method=user-specified`, retain an adult-domain library ID or `CUSTOM`, store the exact text in `wardrobe_custom_override`, and create a new fingerprint. A clearly adult custom choice may cross masculine/feminine presentation groups but may not cross the age domain. User-specified wardrobe is not permitted for infant, toddler, child, teen, juvenile, or age-uncertain profiles; use a model-curated eligible minor-safe library style instead. For `fixed` or `none`, use the manifest's defined `not-applicable` and zero values.

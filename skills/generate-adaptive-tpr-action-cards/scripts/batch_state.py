@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,6 +32,7 @@ FAILURE_CODES = {
     "PROFILE_REFERENCE_MISMATCH",
     "CHARACTER_ACTION_MISMATCH",
     "CHARACTER_CONSISTENCY",
+    "WARDROBE_STYLE_MISMATCH",
     "WARDROBE_UNSAFE",
     "REF_MISSING",
     "REF_EXCLUDED",
@@ -43,6 +45,7 @@ FAILURE_CODES = {
     "GEN_COMPOSITION",
     "GEN_UNWANTED_ELEMENT",
     "GEN_BACKEND_UNAVAILABLE",
+    "GEN_BACKEND_POLICY",
     "COMP_SIZE_DPI",
     "COMP_CAPTION",
     "COMP_METADATA",
@@ -54,6 +57,9 @@ FAILURE_CODES = {
     "PKG_INTEGRITY",
     "WORD_LAYOUT",
     "DELIVERY_UNCONFIRMED",
+}
+WARDROBE_UNSAFE_REASONS = {
+    "minor-sexualization",
 }
 REQUIRED_FIELDS = {
     "character_id",
@@ -120,6 +126,7 @@ def parse_args() -> argparse.Namespace:
     visual.add_argument("--result", choices=["pass", "fail"], required=True)
     visual.add_argument("--failure-code", choices=sorted(FAILURE_CODES))
     visual.add_argument("--detail", default="")
+    visual.add_argument("--unsafe-reason", choices=sorted(WARDROBE_UNSAFE_REASONS))
     visual.add_argument("--diversity-pass", action="store_true")
 
     fail = subparsers.add_parser("fail")
@@ -127,6 +134,7 @@ def parse_args() -> argparse.Namespace:
     fail.add_argument("--gate", choices=["auto", "visual"], required=True)
     fail.add_argument("--failure-code", choices=sorted(FAILURE_CODES), required=True)
     fail.add_argument("--detail", default="")
+    fail.add_argument("--unsafe-reason", choices=sorted(WARDROBE_UNSAFE_REASONS))
 
     retry = subparsers.add_parser("retry")
     add_selection(retry)
@@ -168,6 +176,144 @@ def append_failure(row: dict[str, str], code: str, detail: str) -> None:
         row["failure_detail"] = "\n".join(
             value for value in (row.get("failure_detail", ""), entry) if value
         )
+
+
+def reported_failure_codes(
+    row: dict[str, str], *, age_domain: str | None = None
+) -> dict[str, str]:
+    """Separate the current failure from retained audit history for status output."""
+    recorded = [value for value in row.get("failure_codes", "").split(";") if value]
+    failure_is_active = (
+        row.get("qa_auto_status", "").casefold() == "fail"
+        or row.get("qa_visual_status", "").casefold() == "fail"
+        or row.get("qa_status", "").casefold() in {"fail", "blocked"}
+    )
+    active: list[str] = []
+    historical = list(recorded)
+    if failure_is_active and recorded:
+        detail_lines = row.get("failure_detail", "").splitlines()
+        last_reopen = -1
+        for index, line in enumerate(detail_lines):
+            if "workflow reopened:" in line or "composition reopened:" in line:
+                last_reopen = index
+        active = []
+        available_counts = {code: recorded.count(code) for code in set(recorded)}
+        for line in detail_lines[last_reopen + 1 :]:
+            match = re.match(r"^\[[^\]]+\]\s+([A-Z][A-Z0-9_]+):", line)
+            if match:
+                code = match.group(1)
+                if code in FAILURE_CODES and available_counts.get(code, 0) > 0:
+                    active.append(code)
+                    available_counts[code] -= 1
+        if not active:
+            # Legacy rows could record a code without a structured detail line.
+            # Treat only the latest code as current rather than reactivating the
+            # entire append-only history.
+            active = [recorded[-1]]
+        historical = list(recorded)
+        for code in reversed(active):
+            for index in range(len(historical) - 1, -1, -1):
+                if historical[index] == code:
+                    historical.pop(index)
+                    break
+        # Wardrobe safety is a child/age-uncertain gate. Even a legacy or
+        # manually edited adult audit trail must never reactivate it.
+        if age_domain == "adult" and "WARDROBE_UNSAFE" in active:
+            active = [code for code in active if code != "WARDROBE_UNSAFE"]
+            historical = list(recorded)
+            for code in reversed(active):
+                for index in range(len(historical) - 1, -1, -1):
+                    if historical[index] == code:
+                        historical.pop(index)
+                        break
+    return {
+        "failure_codes": ";".join(recorded),
+        "active_failure_codes": ";".join(active),
+        "historical_failure_codes": ";".join(historical),
+        "recorded_failure_codes": ";".join(recorded),
+    }
+
+
+def validated_failure_detail(
+    row: dict[str, str],
+    code: str,
+    detail: str,
+    unsafe_reason: str | None,
+    *,
+    age_domain: str | None = None,
+) -> str:
+    """Require structured evidence before WARDROBE_UNSAFE can enter the audit trail."""
+    clean_detail = detail.strip()
+    if "\r" in detail or "\n" in detail:
+        raise ValueError("--detail must be one line and cannot contain CR or LF")
+    if code != "WARDROBE_UNSAFE":
+        if unsafe_reason:
+            raise ValueError("--unsafe-reason is only valid with WARDROBE_UNSAFE")
+        if not clean_detail:
+            raise ValueError(f"{code} requires a concrete non-empty --detail")
+        return clean_detail
+    if not unsafe_reason:
+        raise ValueError("WARDROBE_UNSAFE requires --unsafe-reason")
+    if unsafe_reason not in WARDROBE_UNSAFE_REASONS:
+        raise ValueError(
+            "WARDROBE_UNSAFE supports only --unsafe-reason minor-sexualization"
+        )
+    if age_domain not in {"child", "uncertain"}:
+        raise ValueError(
+            "WARDROBE_UNSAFE is valid only for a child or age-uncertain profile; "
+            "it is forbidden for a clearly adult profile"
+        )
+    if not clean_detail:
+        raise ValueError("WARDROBE_UNSAFE requires a concrete non-empty --detail")
+    return f"unsafe_reason={unsafe_reason}; {clean_detail}"
+
+
+def validated_event_reason(reason: str) -> str:
+    clean_reason = reason.strip()
+    if "\r" in reason or "\n" in reason:
+        raise ValueError("workflow reason must be one line and cannot contain CR or LF")
+    if not clean_reason:
+        raise ValueError("workflow reason must be non-empty")
+    return clean_reason
+
+
+def manifest_age_domain(manifest: Path, row: dict[str, str]) -> str:
+    """Resolve the selected row's approved age domain for wardrobe-safety QA."""
+    # Keep imports local: wardrobe_choice imports character_profile during CLI
+    # startup, while this state tool is also imported by tests and delivery QA.
+    from character_profile import load_profiles
+    from wardrobe_choice import resolve_age_domain
+
+    profile_path = manifest.with_name("character_profile.csv")
+    if not profile_path.is_file():
+        raise ValueError(
+            "WARDROBE_UNSAFE requires the batch character_profile.csv beside "
+            "the manifest"
+        )
+    profiles, errors = load_profiles(profile_path)
+    if errors:
+        raise ValueError(
+            "WARDROBE_UNSAFE requires a valid approved character profile: "
+            + "; ".join(errors)
+        )
+    character_id = row.get("character_id", "")
+    profile = profiles.get(character_id)
+    if profile is None:
+        raise ValueError(
+            f"WARDROBE_UNSAFE cannot resolve character_id {character_id!r} "
+            "in character_profile.csv"
+        )
+    if row.get("character_profile_version") != profile.get("profile_version"):
+        raise ValueError(
+            "WARDROBE_UNSAFE requires the manifest character_profile_version to "
+            "match the approved profile"
+        )
+    if row.get("character_profile_sha256") != profile.get("_profile_sha256"):
+        raise ValueError(
+            "WARDROBE_UNSAFE requires the manifest character profile SHA-256 to "
+            "match the approved profile"
+        )
+    return resolve_age_domain(profile)
 
 
 def integer_field(row: dict[str, str], name: str, default: int = 0) -> int:
@@ -286,6 +432,7 @@ def advance_row(row: dict[str, str], args) -> None:
 
 
 def reset_for_retry(row: dict[str, str], reason: str) -> None:
+    reason = validated_event_reason(reason)
     row["workflow_state"] = "planned"
     row["generation_version"] = str(integer_field(row, "generation_version", 1) + 1)
     row["raw_output_path"] = ""
@@ -308,6 +455,7 @@ def reset_for_retry(row: dict[str, str], reason: str) -> None:
 
 
 def reset_for_recompose(row: dict[str, str], reason: str) -> None:
+    reason = validated_event_reason(reason)
     if integer_field(row, "composition_attempt_count") >= 2:
         raise ValueError(f"{row['number']}: composition retry limit reached")
     row["workflow_state"] = "generated"
@@ -347,7 +495,15 @@ def main() -> int:
                         ),
                         "generation_interface": row.get("generation_interface", ""),
                         "generation_model": row.get("generation_model", ""),
-                        "failure_codes": row.get("failure_codes", ""),
+                        **reported_failure_codes(
+                            row,
+                            age_domain=(
+                                manifest_age_domain(args.manifest, row)
+                                if "WARDROBE_UNSAFE"
+                                in row.get("failure_codes", "").split(";")
+                                else None
+                            ),
+                        ),
                     }
                     for row in chosen
                 ],
@@ -372,7 +528,19 @@ def main() -> int:
                     raise ValueError("--failure-code is required for failed visual QA")
                 row["qa_visual_status"] = "fail"
                 row["qa_status"] = "fail"
-                append_failure(row, args.failure_code, args.detail)
+                age_domain = (
+                    manifest_age_domain(args.manifest, row)
+                    if args.failure_code == "WARDROBE_UNSAFE"
+                    else None
+                )
+                detail = validated_failure_detail(
+                    row,
+                    args.failure_code,
+                    args.detail,
+                    args.unsafe_reason,
+                    age_domain=age_domain,
+                )
+                append_failure(row, args.failure_code, detail)
             row["updated_at"] = now_iso()
         elif args.command == "fail":
             if row.get("workflow_state") in {"qa_passed", "packaged", "delivered"}:
@@ -381,7 +549,19 @@ def main() -> int:
                 )
             row[f"qa_{args.gate}_status"] = "fail"
             row["qa_status"] = "fail"
-            append_failure(row, args.failure_code, args.detail)
+            age_domain = (
+                manifest_age_domain(args.manifest, row)
+                if args.failure_code == "WARDROBE_UNSAFE"
+                else None
+            )
+            detail = validated_failure_detail(
+                row,
+                args.failure_code,
+                args.detail,
+                args.unsafe_reason,
+                age_domain=age_domain,
+            )
+            append_failure(row, args.failure_code, detail)
             if integer_field(row, "attempt_count") >= 3:
                 row["qa_status"] = "blocked"
             row["updated_at"] = now_iso()

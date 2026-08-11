@@ -8,7 +8,7 @@
 
 技能源码位于独立目录中；仓库级文档、许可证和测试不会混入可安装的 Skill 包。
 
-当前流程包含两轮模型推荐选择（宽泛色彩范围、宽泛穿搭风格）、纯白或自动多样背景、生成接口选择、四张样卡确认门，以及可恢复的 200 动作批处理。启用默认并发时采用“1 个编排主线程 + 4 个生图子 Agent”；主线程不参与生图，宿主容量不足时必须明确降级，不能伪装成四子并发。
+当前流程包含两轮模型推荐选择（宽泛色彩范围、宽泛穿搭风格）；风格库按儿童/成人 × 男性化/女性化穿搭呈现分组，并保留共享兜底，分组不代表真实性别身份。流程还包含纯白或自动多样背景、生成接口选择、四张样卡确认门，以及可恢复的 200 动作批处理。启用默认并发时采用“1 个编排主线程 + 4 个生图子 Agent”；主线程不参与生图，宿主容量不足时必须明确降级，不能伪装成四子并发。
 
 ## 运行环境
 
@@ -35,7 +35,13 @@ python -m unittest discover -s tests -v
 
 ## 安装
 
-将 `skills/generate-adaptive-tpr-action-cards/` 复制到你的 Codex Skills 目录，或从 GitHub 仓库安装该子目录。安装后以 `$generate-adaptive-tpr-action-cards` 显式调用。
+仓库中的 `skills/generate-adaptive-tpr-action-cards/` 是发布源码目录，本身不是 Codex 的仓库级自动发现位置。安装时任选一种方式：
+
+- 仅供当前仓库使用：把该目录复制或建立目录符号链接到 `.agents/skills/generate-adaptive-tpr-action-cards/`。
+- 供当前用户的所有仓库使用：复制或链接到 `$HOME/.agents/skills/generate-adaptive-tpr-action-cards/`。
+- 也可让 `$skill-installer` 从 GitHub 仓库安装该子目录。
+
+Codex 通常会自动检测新增或修改的 Skill。安装后在 Skills 选择器或 `$` 提及列表中确认它已出现，再以 `$generate-adaptive-tpr-action-cards` 显式调用；若更新没有出现，再重启 Codex。GitHub 安装副本只会包含已提交并推送的版本，工作区里未提交的修改不会自动同步过去。
 
 ## 许可证
 

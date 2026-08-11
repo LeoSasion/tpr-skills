@@ -14,7 +14,7 @@ Inspect the final A4 card, not only the raw generated image. A card passes only 
 ## Deterministic gate
 
 - The recorded reference exists in the photo pool, belongs to the manifest's `character_id`, is an approved original, and matches `reference_sha256`.
-- The approved profile version and computed `character_profile_sha256` match every selected manifest row; adaptation mode, persona, wardrobe policy, library version, model/user method, final fingerprint, evidence tokens, and both selected ranges are stable across the batch.
+- The approved profile version and computed `character_profile_sha256` match every selected manifest row; adaptation mode, persona, wardrobe policy, library version, model/user method, final fingerprint, evidence tokens, and both selected ranges are stable across the batch. For a model-curated current-version choice, the selected style belongs to the profile-derived clothing-presentation scope or `shared`; frozen legacy selections retain their original verification contract.
 - `subagent_parallelism`, positive-integer `subagent_concurrency`, and `background_mode` are explicit and stable across the batch. Enabled uses exactly `4`, disabled uses exactly `1`, and custom preserves the confirmed count. Every row records the actual `background_treatment`; white mode uses exactly `pure-white`, while auto-varied mode records a non-white treatment.
 - Under enabled or custom parallelism, execution uses the recorded number of image-generation child workers in addition to the primary agent. The primary remains orchestration-only and does not submit generation requests, own rows, or backfill a failed worker; a default run is one primary plus four child workers, never one primary plus three children.
 - `generation_backend_mode`, `generation_interface`, and `generation_model` are explicit and stable across the batch. The exact route passed a current capability/authentication check before planning; no model or interface was silently substituted, and no API key or token appears in the manifest, prompt, report, or log.
@@ -36,7 +36,7 @@ Run `scripts/verify_delivery.py --character-profile ...` after visual QA has bee
 - The result is recognizably the selected primary character rather than a generic replacement.
 - Approved face or head geometry, colors, markings, materials, signature elements, apparent life stage, and body proportions remain credible for the character kind.
 - Expression, pose, persona, and wardrobe changes do not distort identity anchors or invent anatomy.
-- Apparent age and gender presentation remain rendering labels; uncertain evidence is not turned into a confident demographic claim.
+- Apparent age and gender presentation remain rendering labels; the library's child/adult masculine/feminine scopes describe clothing presentation, not actual identity, and uncertain evidence resolves to `shared` rather than a confident demographic claim.
 - No excluded source, other character, or generated output was used as character evidence.
 - The manifest profile version and SHA-256 match the approved character profile used for planning.
 - The selected generation Skill/API received the same approved original, identity anchors, and immutable row contract; backend differences did not weaken identity or safety constraints.
@@ -44,16 +44,18 @@ Run `scripts/verify_delivery.py --character-profile ...` after visual QA has bee
 ### Persona and wardrobe
 
 - Persona is visibly useful art direction, not a claim about a real subject's personality, occupation, or identity.
-- The final batch uses the selected broad color direction, selected broad style family, and post-selection approved profile factors. Recommendation evidence is non-sensitive and the options were model-curated rather than shuffled.
+- The final batch uses the selected broad color direction, selected broad style family, and post-selection approved profile factors. Recommendation evidence is non-sensitive, the options were model-curated rather than shuffled, and the style was eligible for the resolved group or explicitly recorded as user-specified.
+- A user-specified adult library ID may cross masculine/feminine presentation groups inside the adult age domain, and adult `CUSTOM` text is fingerprint-bound exactly as written without an added safety classification. Infant, toddler, child, teen, juvenile, and age-uncertain profiles never accept user-specified/CUSTOM wardrobe text; they remain inside model-curated eligible minor-safe library rows unless clear adult confirmation changes the approved profile.
 - Both selected ranges remain visually coherent across the batch; sub-palettes, silhouettes, substyles, layers, materials, textures, trims, and restrained accessories must not drift outside them.
 - Every approved color, silhouette, and substyle is covered before reuse where action safety allows; explicit restrictions are honored.
-- Clothing or costume is compatible with character anatomy, apparent life stage, action range, and safety notes, without gender stereotyping or body reshaping.
+- Minors and age-uncertain subjects remain age-appropriate and nonsexualized. Clearly adult-presenting subjects receive no Skill-level wardrobe safety review: do not fail, reduce, or override an adult outfit because of coverage, exposure, sensuality, garment type, sheer material, heels, swimwear, lingerie styling, or any other fashion-scale judgment. A backend's own hard refusal is reported as a backend limitation.
+- Every work packet was emitted by `scripts/build_work_packets.py` and passed `scripts/verify_work_packets.py` immediately before dispatch. The verifier rebuilds the expected object, so every field, `prompt_sha256`, profile/reference binding, and structured scope must match exactly. A clearly adult packet uses `adult-none`, has empty `minor_safety_notes` and `minor_avoid_features`, and contains none of the profile's child-safety free text because the builder never forwards those fields. A child or age-uncertain packet uses `minor-nonsexualized`. Never hand-edit or append wardrobe-safety language after the builder.
 - Signature features remain visible. Action-critical joints, paws, hands, feet, face, wings, wheels, or tail are not obscured.
 - `fixed` and `none` wardrobe policies are followed exactly and are not penalized for repetition.
 
 ### Action and anatomy
 
-- The planned `suitability_handling` exactly matches the action rule and its `adaptation_note` is visibly satisfied; for example, `symbolic-safe-only` contains no exposure or bodily detail, and `layered-safe-only` retains complete opaque base clothing.
+- The planned `suitability_handling` follows the action rule's `safety_scope`. Universal relationship/consent rules apply to every age domain. `minor-only` rules apply only to child or age-uncertain rows—for example, their `symbolic-safe-only` contains no exposure and `layered-safe-only` retains complete opaque base clothing. A clearly adult row uses `none` / `pass` / `ok` for those same minor-only entries and receives no Skill-level wardrobe or exposure override.
 - Ignore the caption: the requested verb must still be immediately readable.
 - The semantic record's `qa_readability_cue` is visibly satisfied.
 - Feet, hips, torso, shoulders, head, gaze, hands, and any required object form one plausible motion chain.
@@ -116,10 +118,12 @@ Local existence, checksum, ZIP integrity, or a `sandbox:` path proves content on
 | `PROFILE_REFERENCE_MISMATCH` | Use an approved original registered to the manifest's character ID and revalidate the profile. |
 | `CHARACTER_ACTION_MISMATCH` | Use a semantically faithful anatomy-aware adaptation or offer clickable adaptation/replacement choices. |
 | `CHARACTER_CONSISTENCY` | Restore identity anchors, proportions, markings, material, or signature design from the approved profile. |
-| `WARDROBE_UNSAFE` | Replace or minimally override clothing that obscures the action, restricts motion, or is age-inappropriate. |
+| `WARDROBE_STYLE_MISMATCH` | Restore the finalized color/style range when an adult result is too conservative or otherwise aesthetically off-brief. If an outfit obscures the intended action, use `GEN_ACTION` or `GEN_ANATOMY`, not a wardrobe-safety code. |
+| `WARDROBE_UNSAFE` | Use only when an infant, toddler, child, teen, juvenile, or age-uncertain subject is sexualized. The failure command requires `--unsafe-reason minor-sexualization` plus a concrete non-empty detail. It is invalid for every clearly adult profile; backend restrictions are reported separately. |
 | `REF_MISSING`, `REF_EXCLUDED`, `REF_HASH_CHANGED` | Repair or re-approve the original-photo record; do not generate. |
 | `SEMANTIC_MISSING`, `SEMANTIC_AMBIGUOUS` | Complete the motion semantics or ask one content question. |
 | `GEN_BACKEND_UNAVAILABLE` | Stop before sending image data; resolve the exact selected Skill/API, model, authentication path, output capability, and requested concurrency, or return to the model/interface choice. |
+| `GEN_BACKEND_POLICY` | Preserve the user's adult wardrobe direction and report that the selected generation backend refused it under the backend's own hard policy. Do not relabel the refusal as `WARDROBE_UNSAFE` or silently substitute a conservative outfit. |
 | `GEN_IDENTITY` | Choose another approved same-character original and reduce appearance changes. |
 | `GEN_ACTION` | Rewrite the motion chain and contrast the confusing neighboring action. |
 | `GEN_ANATOMY` | Specify support, joints, hand shape, and interaction geometry. |

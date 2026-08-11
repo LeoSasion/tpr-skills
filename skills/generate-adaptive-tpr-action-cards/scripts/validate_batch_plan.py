@@ -26,6 +26,7 @@ from validate_action_library import load_validated_library, load_validated_suita
 from wardrobe_choice import (
     DEFAULT_LIBRARY as DEFAULT_WARDROBE_LIBRARY,
     load_library as load_wardrobe_library,
+    resolve_age_domain,
     validate_model_curated_binding,
 )
 
@@ -110,6 +111,7 @@ def validate_suitability_binding(
     row: dict[str, str],
     preset_number: str,
     suitability: dict[str, dict[str, str]],
+    age_domain: str,
 ) -> list[str]:
     errors: list[str] = []
     risk_tags = {
@@ -125,6 +127,26 @@ def validate_suitability_binding(
         if row.get("suitability_handling") != "none":
             errors.append(
                 f"{identifier}: unlisted preset action must use suitability_handling=none"
+            )
+        return errors
+
+    if rule.get("safety_scope") == "minor-only" and age_domain == "adult":
+        if risk_tags != {"none"}:
+            errors.append(
+                f"{identifier}: clearly adult preset {preset_number} must use "
+                "action_risk_tags=none because its suitability rule is minor-only"
+            )
+        if row.get("suitability_handling") != "none":
+            errors.append(
+                f"{identifier}: clearly adult preset {preset_number} must use "
+                "suitability_handling=none; do not import the minor safety override"
+            )
+        if row.get("adaptation_status") != "pass" or row.get(
+            "adaptation_reason"
+        ) != "ok":
+            errors.append(
+                f"{identifier}: clearly adult preset {preset_number} must use "
+                "adaptation_status=pass and adaptation_reason=ok for a minor-only rule"
             )
         return errors
 
@@ -169,6 +191,8 @@ def validate_rows(
 
     for row in rows:
         identifier = row["number"]
+        profile = profiles.get(row.get("character_id", ""))
+        age_domain = resolve_age_domain(profile) if profile is not None else "uncertain"
         if library:
             source_row = row.get("source_row", "")
             if not source_row.isdigit():
@@ -196,6 +220,7 @@ def validate_rows(
                                 row,
                                 preset_number,
                                 suitability,
+                                age_domain,
                             )
                         )
         for field in REQUIRED_PLAN_FIELDS:
@@ -238,7 +263,6 @@ def validate_rows(
                 if semantic.get("version") != row.get("semantic_version"):
                     errors.append(f"{identifier}: semantic version does not match library")
 
-        profile = profiles.get(row.get("character_id", ""))
         if profile is not None:
             errors.extend(validate_model_curated_binding(row, wardrobe_library))
             policy = profile.get("wardrobe_policy")
@@ -444,7 +468,12 @@ def main() -> int:
         warnings.append("No action-suitability rules were found for this custom library")
     errors = (
         profile_errors
-        + validate_manifest_profiles(profiles, args.manifest, selected_rows=rows)
+        + validate_manifest_profiles(
+            profiles,
+            args.manifest,
+            selected_rows=rows,
+            wardrobe_library=wardrobe_library,
+        )
         + errors
     )
 

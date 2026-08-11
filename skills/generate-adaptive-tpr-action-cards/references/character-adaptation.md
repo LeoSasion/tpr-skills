@@ -6,7 +6,7 @@ Use this reference to turn approved uploaded images into a reusable character pr
 
 Record visible evidence conservatively:
 
-- `character_kind`: human, animal, mascot, doll-or-toy, robot, fantasy-creature, stylized-figure, or other.
+- `character_kind`: human, animal, mascot, doll-or-toy, robot, fantasy-creature, stylized-figure, or other. A photorealistic person with ordinary human anatomy remains `human` even if the source was AI-generated; use `stylized-figure` only for visibly non-photorealistic or materially stylized anatomy.
 - `identity_anchors`: stable traits required for recognition, such as face or head geometry, hairstyle or fur shape, color pattern, markings, eye treatment, ears, tail, material, or signature design elements.
 - `appearance_summary`: visible colors, textures, facial or head features, and other non-sensitive appearance cues.
 - `proportion_summary`: neutral structural proportions relevant to generation, such as head-to-body ratio, torso and limb length, build or silhouette, and stance. Do not evaluate attractiveness, health, weight, or fitness.
@@ -26,6 +26,8 @@ Do not infer ethnicity, nationality, health, disability, religion, sexual orient
 7. Record the approved source filenames in `analysis_basis` and the reference-independent safety constraints in `action_safety_notes`.
 8. Increment `profile_version` after any identity-anchor, life-stage, persona-pool, or wardrobe-policy change.
 
+For a new batch or a newly finalized wardrobe choice, derive `action_safety_notes` and `avoid_outfit_features` again from the current originals, current selection, and current action rules. Do not copy these fields from an older batch, previous profile, or work packet. If the selection changes their meaning, increment `profile_version`, recompute its SHA-256, and re-finalize the wardrobe fingerprint.
+
 If references appear to depict different characters, or disagreement would materially affect identity, anatomy, or safe wardrobe treatment, stop and show clickable primary-character choices. Do not merge them.
 
 ## Choose adaptation mode
@@ -33,11 +35,11 @@ If references appear to depict different characters, or disagreement would mater
 Use exactly one mode for a batch:
 
 - `recommend`: use only when the user explicitly asks for curated or recommended styling. Use `recommended_persona` and the profile's ordered wardrobe factors, adapting them to each action.
-- `specified`: use the user's explicit persona and wardrobe direction. Preserve identity and safety constraints even when they conflict with a styling request.
+- `specified`: use the user's explicit persona and wardrobe direction. Preserve identity and age-gated safety constraints. A clearly adult-presenting subject's explicit sensual-fashion request is not a safety conflict and must not be downgraded to conservative full coverage.
 
 Keep the selected persona stable across a batch. A persona may guide energy, styling, and expression vocabulary, but it must not make every card use the same pose or emotion.
 
-For a new batch, first let the model recommend three broad color directions from the approved library, then recommend three broad style families conditioned on the selected color. Each screen adds `更多其他`; it refreshes only that screen with next-best unshown IDs. Never mechanically randomize the recommendations. Once both choices are selected, record `specified` mode and keep both broad ranges stable across cards.
+For a new batch, first let the model recommend three broad color directions from the approved library. Before the conditioned style round, resolve the internal clothing-presentation scope from the approved profile: child/adult × masculine/feminine when medium/high evidence is clear, otherwise `shared`. This scope is not a gender-identity claim and adds no routine question. Each screen adds `更多其他`; it refreshes only that screen with next-best unshown IDs while preserving the resolved scope. Never mechanically randomize the recommendations. Once both choices are selected, record `specified` mode and keep both broad ranges stable across cards. Explicit cross-presentation text remains user-specified, while the minor/adult safety domain never changes silently.
 
 ## Apply wardrobe policy
 
@@ -48,7 +50,9 @@ Use one profile policy:
 - `fixed`: reproduce the approved `signature_outfit`; repeated clothing is correct and must not fail diversity checks.
 - `none`: use `not-applicable` for outfit, color, silhouette, and style. Do not add clothing merely to satisfy a diversity rule.
 
-Clothing must fit the apparent life stage, character anatomy, action range, and print audience. Avoid sexualization, unsafe footwear, motion-obscuring garments, loose items near wheels or steps, culturally specific symbolism not requested by the user, and accessories that cover action-critical joints or identity anchors.
+Wardrobe safety review applies only to `infant`, `toddler`, `child`, `teen`, `juvenile`, or age-`uncertain` subjects: use age-appropriate nonsexualized styling and do not use lingerie-inspired, cleavage-focused, or revealing sexualized presentation. For clearly adult-presenting `young-adult`, `adult`, `mature`, or `older-adult` subjects, the Skill adds no wardrobe coverage, exposure, sensuality, garment-type, or styling-scale restriction. Follow the exact selected adult direction and maximize variety inside it. If clothing makes an action unreadable, fix or fail the action/composition with `GEN_ACTION` or `GEN_ANATOMY`; do not call the adult clothing unsafe. The selected generation backend's own hard policy still applies and is reported as a backend limitation.
+
+For every clearly adult profile, never place `nonsexualized`, `never sexualize`, `opaque from neckline to ankles`, forced full coverage, or generic bans on low necklines, bare midriffs, sleeveless/camisole/strapless/off-shoulder/open-back/short-hem/high-slit/swimwear, sheer fabrics, or heels in `action_safety_notes`, `avoid_outfit_features`, or a work packet. A translucent or revealing adult garment is not a Skill-level safety failure. If the user explicitly requests a conservative adult direction, encode it as positive outfit factors rather than a safety prohibition.
 
 Do not use profile factor lists to choose the visible Round-1 or Round-2 recommendations. After selection, treat them as the audited expansion of the chosen ranges. Keep `outfit_style` within the selected broad style family and `outfit_color` within the selected broad color direction. Cover every approved factor before reuse, balance long-batch cycles, and add action-specific layering, material, texture, trim, or restrained accessory detail so complete outfits stay visibly different. `outfit_color`, `outfit_silhouette`, and `outfit_style` must exactly name selected profile factors.
 
@@ -63,14 +67,17 @@ If the action cannot be represented without changing the verb or violating the c
 
 ## Write the generation instruction
 
+Do not hand-author the final prompt. Run `scripts/build_work_packets.py` only after the profile and manifest pass validation, then send the packet's exact prompt and approved reference. The deterministic builder binds the current profile version/SHA, labels the packet `adult-none` or `minor-nonsexualized`, and never forwards `action_safety_notes` or `avoid_outfit_features` into a clearly adult packet. Rebuild after any input changes.
+
 Include only useful profile data:
 
 - Stable identity anchors and proportion summary.
 - Character kind and anatomy constraints.
-- Apparent life-stage presentation when relevant to safe styling.
+- Apparent life-stage presentation when relevant to the age gate; do not apply minor-only modesty rules to a clearly adult-presenting subject.
 - Selected persona and exact wardrobe factors.
 - Signature elements and `do_not_change` traits.
 - Action-specific safety and ambiguity cues.
+- A separate wardrobe gate: the minor/age-uncertain nonsexualization rule, or an explicit statement that a clearly adult profile receives no Skill-level wardrobe restriction. Do not add adult coverage or exposure prohibitions.
 - The selected `background_mode` and the row's exact `background_treatment`; treat uploaded backgrounds as non-binding reference content.
 - The selected generation interface's supported reference-image and prompt fields; keep the identity, wardrobe, action, background, and safety contract semantically identical across recommended and custom backends.
 
